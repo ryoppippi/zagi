@@ -15,7 +15,7 @@ pub fn main() !void {
         try stderr.print("usage: zagi <git-command> [args...]\n", .{});
         try stderr.print("\nzagi is a git wrapper that passes commands through to git.\n", .{});
         try stderr.print("Special commands:\n", .{});
-        try stderr.print("  diff - Uses difftastic for better diffs, shows one file at a time\n", .{});
+        try stderr.print("  diff - Uses difftastic for syntax-aware diffs, shows one file at a time\n", .{});
         std.process.exit(1);
     }
 
@@ -48,23 +48,63 @@ fn handleDiffCommand(allocator: std.mem.Allocator, args: [][]const u8) !void {
 
     // If difftastic is not available, fall back to regular git diff
     if (!difft_available) {
-        try stderr.print("difftastic not found, falling back to git diff\n", .{});
-        try stderr.print("Install difftastic with: brew install difftastic (or your package manager)\n\n", .{});
+        try stderr.print("⚠️  difftastic not found, falling back to git diff\n", .{});
+        try stderr.print("💡 Install difftastic for better diffs:\n", .{});
+        try stderr.print("   • macOS:   brew install difftastic\n", .{});
+        try stderr.print("   • Linux:   cargo install difftastic\n", .{});
+        try stderr.print("   • Arch:    pacman -S difftastic\n\n", .{});
         try passThrough(allocator, args);
         return;
     }
 
-    // Build difftastic command with remaining arguments
-    var difft_args = std.ArrayList([]const u8).init(allocator);
-    defer difft_args.deinit();
+    // First, get the list of changed files
+    var git_files_args = std.ArrayList([]const u8).init(allocator);
+    defer git_files_args.deinit();
+    
+    try git_files_args.append("git");
+    try git_files_args.append("diff");
+    try git_files_args.append("--name-only");
+    
+    // Add user's additional arguments (excluding file paths for now)
+    for (args[2..]) |arg| {
+        if (!std.mem.startsWith(u8, arg, "--")) {
+            // Skip positional arguments for the file list query
+            continue;
+        }
+        try git_files_args.append(arg);
+    }
 
-    try difft_args.append("difft");
+    var git_files_child = std.process.Child.init(git_files_args.items, allocator);
+    git_files_child.stdout_behavior = .Pipe;
+    git_files_child.stderr_behavior = .Inherit;
     
-    // Add difftastic-specific options for better output
-    try difft_args.append("--color=always");
-    try difft_args.append("--display=inline");
+    try git_files_child.spawn();
     
-    // Build git diff command to pipe to difftastic
+    const files_output = try git_files_child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    defer allocator.free(files_output);
+    
+    _ = try git_files_child.wait();
+
+    // Parse the files list
+    var changed_files = std.ArrayList([]const u8).init(allocator);
+    defer changed_files.deinit();
+    
+    var file_iter = std.mem.split(u8, files_output, "\n");
+    while (file_iter.next()) |file| {
+        if (file.len > 0) {
+            try changed_files.append(file);
+        }
+    }
+
+    if (changed_files.items.len == 0) {
+        try stdout.print("No changes to diff\n", .{});
+        return;
+    }
+
+    // Determine which file to show (first one by default)
+    const file_to_show = changed_files.items[0];
+
+    // Build git diff command for the specific file
     var git_args = std.ArrayList([]const u8).init(allocator);
     defer git_args.deinit();
     
@@ -75,29 +115,40 @@ fn handleDiffCommand(allocator: std.mem.Allocator, args: [][]const u8) !void {
     for (args[2..]) |arg| {
         try git_args.append(arg);
     }
+    
+    // Add the specific file
+    try git_args.append("--");
+    try git_args.append(file_to_show);
 
-    // Get the full diff output from git
+    // Get the diff output from git
     var git_child = std.process.Child.init(git_args.items, allocator);
     git_child.stdout_behavior = .Pipe;
     git_child.stderr_behavior = .Inherit;
     
     try git_child.spawn();
     
-    const git_output = try git_child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024); // 100MB max
+    const git_output = try git_child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024);
     defer allocator.free(git_output);
     
     _ = try git_child.wait();
 
-    // If no diff output, exit early
     if (git_output.len == 0) {
-        try stdout.print("No changes to diff\n", .{});
+        try stdout.print("No changes in {s}\n", .{file_to_show});
         return;
     }
+
+    // Build difftastic command
+    var difft_args = std.ArrayList([]const u8).init(allocator);
+    defer difft_args.deinit();
+
+    try difft_args.append("difft");
+    try difft_args.append("--color=always");
+    try difft_args.append("--display=inline");
 
     // Run difftastic on the git output
     var difft_child = std.process.Child.init(difft_args.items, allocator);
     difft_child.stdin_behavior = .Pipe;
-    difft_child.stdout_behavior = .Pipe;
+    difft_child.stdout_behavior = .Inherit;
     difft_child.stderr_behavior = .Inherit;
     
     try difft_child.spawn();
@@ -107,86 +158,46 @@ fn handleDiffCommand(allocator: std.mem.Allocator, args: [][]const u8) !void {
     difft_child.stdin.?.close();
     difft_child.stdin = null;
     
-    const difft_output = try difft_child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024); // 100MB max
-    defer allocator.free(difft_output);
+    const term = try difft_child.wait();
     
-    _ = try difft_child.wait();
+    // Check if difftastic succeeded
+    const success = switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 
-    // Parse output to extract first file only
-    try showFirstFileOnly(stdout, difft_output, args[2..]);
-}
-
-fn showFirstFileOnly(writer: anytype, output: []const u8, original_args: [][]const u8) !void {
-    // Split output into lines
-    var line_iter = std.mem.split(u8, output, "\n");
-    var current_file: ?[]const u8 = null;
-    var file_count: usize = 0;
-    var lines_printed: usize = 0;
-    var in_first_file = false;
-    
-    // Look for file separators in difftastic output
-    // Difftastic typically shows files with a separator like "path/to/file"
-    while (line_iter.next()) |line| {
-        // Detect new file (difftastic shows file paths prominently)
-        // This is a simplified heuristic - adjust based on actual difftastic output format
-        if (line.len > 0 and !std.mem.startsWith(u8, line, " ") and 
-            !std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "-") and
-            !std.mem.startsWith(u8, line, "@") and
-            (std.mem.indexOf(u8, line, "/") != null or std.mem.endsWith(u8, line, ".zig") or 
-             std.mem.endsWith(u8, line, ".rs") or std.mem.endsWith(u8, line, ".go") or
-             std.mem.endsWith(u8, line, ".js") or std.mem.endsWith(u8, line, ".ts") or
-             std.mem.endsWith(u8, line, ".py") or std.mem.endsWith(u8, line, ".c") or
-             std.mem.endsWith(u8, line, ".cpp") or std.mem.endsWith(u8, line, ".h"))) {
-            
-            if (current_file == null) {
-                current_file = line;
-                in_first_file = true;
-                file_count = 1;
-            } else if (in_first_file) {
-                // Found second file, stop here
-                file_count = 2;
-                break;
-            }
-        }
-        
-        if (in_first_file) {
-            try writer.print("{s}\n", .{line});
-            lines_printed += 1;
-        }
-    }
-
-    // If we didn't detect multiple files using the heuristic, just show all output
-    if (file_count == 0) {
-        try writer.print("{s}\n", .{output});
+    if (!success) {
+        try stderr.print("\n⚠️  difftastic failed, falling back to git diff\n", .{});
+        try passThrough(allocator, args);
         return;
     }
 
-    // Add recipe command if there are more files
-    if (file_count > 1 or lines_printed > 100) {
-        try writer.print("\n{s}\n", .{"=" ** 80});
-        try writer.print("📝 Recipe: To see the next file, run:\n", .{});
-        try writer.print("  ", .{});
+    // Show recipe command if there are more files
+    if (changed_files.items.len > 1) {
+        try stdout.print("\n", .{});
+        try stdout.print("{'─'}{s}{'─'}\n", .{"─" ** 78});
+        try stdout.print("📁 Showing file 1 of {d}: {s}\n", .{ changed_files.items.len, file_to_show });
+        try stdout.print("\n📝 Recipe: To see the next file, run:\n", .{});
+        try stdout.print("   zagi diff", .{});
+        for (args[2..]) |arg| {
+            try stdout.print(" {s}", .{arg});
+        }
+        try stdout.print(" -- {s}\n", .{changed_files.items[1]});
         
-        if (current_file) |file| {
-            // Suggest showing just the next file using git diff with path
-            try writer.print("git diff", .{});
-            for (original_args) |arg| {
-                try writer.print(" {s}", .{arg});
-            }
-            try writer.print(" -- <next-file>\n", .{});
-        } else {
-            try writer.print("zagi diff", .{});
-            for (original_args) |arg| {
-                try writer.print(" {s}", .{arg});
-            }
-            try writer.print(" -- <file-path>\n", .{});
+        try stdout.print("\n📋 All changed files:\n", .{});
+        for (changed_files.items, 0..) |file, i| {
+            const marker = if (i == 0) "→" else " ";
+            try stdout.print("   {s} {s}\n", .{ marker, file });
         }
         
-        try writer.print("\nOr see all files with: git diff", .{});
-        for (original_args) |arg| {
-            try writer.print(" {s}", .{arg});
+        try stdout.print("\n💡 Or see all files at once with:\n", .{});
+        try stdout.print("   git diff", .{});
+        for (args[2..]) |arg| {
+            try stdout.print(" {s}", .{arg});
         }
-        try writer.print("\n", .{});
+        try stdout.print("\n", .{});
+    } else {
+        try stdout.print("\n✅ Showing the only changed file: {s}\n", .{file_to_show});
     }
 }
 
