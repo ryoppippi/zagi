@@ -357,42 +357,44 @@ priority_mode = "agent"  # agent, human, full
 ### Installation
 
 ```bash
-# macOS/Linux (Homebrew)
-brew install zagi
+curl -fsSL https://raw.githubusercontent.com/mattzcarey/zagi/main/install.sh | sh
+```
 
+This will:
+1. Download the correct binary for your platform
+2. Install it to `~/.local/bin`
+3. Set up `git` as an alias to `zagi`
+
+After installation, restart your shell and use `git` as normal - zagi handles everything!
+
+### Manual Installation
+
+```bash
 # From source
 git clone https://github.com/mattzcarey/zagi.git
 cd zagi
-zig build -Drelease-safe
+zig build -Doptimize=ReleaseFast
+
+# Add alias manually
+zagi alias  # prints the alias command for your shell
 ```
 
-### Quick Start
+### Usage
 
 ```bash
-# Drop-in replacement for git commands
-zagi log           # Optimized log output
-zagi status        # Truncated status
-zagi diff          # Smart diff truncation
+# Use git as normal - zagi provides optimized output
+git log            # Concise commit history
+git status         # Compact status
+git add .          # Confirms what was staged
 
-# Keep using git for write operations
-git add .
+# All other commands pass through to git
 git commit -m "Update feature"
 git push
 ```
 
 ### Integration with AI Agents
 
-Simply replace `git` with `zagi` in agent tool definitions:
-
-```json
-{
-  "name": "git_log",
-  "description": "View commit history",
-  "command": "zagi log"
-}
-```
-
-No retraining or prompt modifications needed!
+No changes needed! Agents use familiar `git` commands and get optimized output automatically.
 
 ---
 
