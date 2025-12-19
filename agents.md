@@ -1,0 +1,218 @@
+# Zagi Development Flow
+
+This document describes the process for adding new git commands to zagi.
+
+## Flow
+
+### 1. Investigate the git command
+
+Before implementing, understand the existing git command:
+
+```bash
+# Run the command and observe output
+git <command>
+
+# Test different scenarios
+git <command> <args>
+
+# Check exit codes
+git <command>; echo "exit: $?"
+
+# Test error cases
+git <command> nonexistent
+```
+
+Document:
+- What does it output on success?
+- What does it output on failure?
+- What are common flags/options?
+- What exit codes does it use?
+
+### 2. Design agent-friendly output
+
+Identify what would be better for agents:
+
+| Problem | Solution |
+|---------|----------|
+| Silent success (no confirmation) | Show what was done |
+| Verbose errors | Concise error messages |
+| Multi-line output with decoration | Compact, parseable format |
+| Unclear state | Show current state after action |
+
+Key questions:
+- What information does an agent need to continue?
+- What feedback confirms the action worked?
+- Can we reduce output while preserving meaning?
+
+### 3. Confirm the API
+
+Before implementing, confirm with the user:
+- Proposed output format
+- Default flags/behavior differences from git
+- Error message format
+
+Example:
+```
+Proposed `zagi add` output:
+
+Success:
+  staged: 2 files
+    A  new-file.txt
+    M  changed-file.txt
+
+Error:
+  error: file.txt not found
+
+Confirm? (y/n)
+```
+
+### 4. Implement in Zig
+
+Create `src/cmds/<command>.zig`:
+
+```zig
+const std = @import("std");
+const c = @cImport(@cInclude("git2.h"));
+const git = @import("git.zig");
+
+pub const Error = error{
+    NotARepository,
+    // command-specific errors
+};
+
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
+    // Implementation using libgit2
+    // Return errors instead of calling std.process.exit()
+}
+```
+
+**Important:** Never call `std.process.exit()` in command modules. Always return errors to main.zig for centralized handling. This enables unit testing and keeps exit codes consistent.
+
+Add routing in `src/main.zig`:
+```zig
+const cmd_name = @import("cmds/<command>.zig");
+// ...
+} else if (std.mem.eql(u8, cmd, "<command>")) {
+    cmd_name.run(allocator, args) catch |err| {
+        try handleError(err);
+    };
+}
+```
+
+### 5. Consider abstractions (after 2+ implementations)
+
+After implementing similar code twice, ask before abstracting:
+
+> "I've now implemented marker functions in both status.zig and add.zig. Should I extract these to a shared git.zig module?"
+
+Only abstract when:
+- Same code appears in 2+ places
+- The abstraction is obvious and stable
+- User confirms it's worth the indirection
+
+### 6. Add Zig tests
+
+Add tests for pure functions in the module:
+
+```zig
+const testing = std.testing;
+
+test "functionName - description" {
+    try testing.expectEqualStrings("expected", functionName(input));
+}
+```
+
+For functions that use `std.process.exit()`, test via integration tests instead.
+
+Update `build.zig` to include new test files:
+```zig
+const cmd_tests = b.addTest(.{
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/cmds/<command>.zig"),
+        .target = target,
+        .optimize = optimize,
+    }),
+});
+cmd_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
+```
+
+### 7. Build and run
+
+```bash
+zig build
+./zig-out/bin/zagi <command>
+```
+
+Fix any compiler errors. Test manually with various inputs.
+
+### 8. Add benchmark tests
+
+Create `bench/src/<command>.test.ts`:
+
+```typescript
+import { describe, test, expect } from "vitest";
+import { execFileSync } from "child_process";
+
+describe("zagi <command>", () => {
+  test("produces smaller output than git", () => {
+    // Compare output size
+  });
+
+  test("functional correctness", () => {
+    // Verify behavior matches git
+  });
+});
+
+describe("performance", () => {
+  test("zagi is reasonably fast", () => {
+    // Benchmark timing
+  });
+});
+```
+
+Run with:
+```bash
+cd bench && bun test
+```
+
+### 9. Optimize (if needed)
+
+If benchmarks show issues:
+1. Profile to find bottlenecks
+2. Consider caching libgit2 state
+3. Reduce allocations
+4. Batch operations where possible
+
+## File Structure
+
+```
+src/
+  main.zig           # Entry point, command routing
+  passthrough.zig    # Pass-through to git CLI
+  cmds/
+    git.zig          # Shared utilities (markers, etc.)
+    log.zig          # zagi log
+    status.zig       # zagi status
+    add.zig          # zagi add
+    <command>.zig    # New commands
+
+bench/
+  src/
+    log.test.ts      # log tests & benchmarks
+    status.test.ts   # status tests & benchmarks
+    add.test.ts      # add tests & benchmarks
+```
+
+## Checklist for new commands
+
+- [ ] Investigate git command behavior
+- [ ] Design agent-friendly output format
+- [ ] Confirm API with user
+- [ ] Implement in `src/cmds/<command>.zig`
+- [ ] Add routing in `main.zig`
+- [ ] Extract shared code (if 2+ usages, ask first)
+- [ ] Add Zig unit tests
+- [ ] Build and test manually
+- [ ] Add TypeScript integration tests
+- [ ] Run benchmarks
+- [ ] Optimize if needed

@@ -1,14 +1,14 @@
 const std = @import("std");
 const c = @cImport(@cInclude("git2.h"));
+const git = @import("git.zig");
 
 const Options = struct {
     max_count: usize = 10,
     full: bool = false,
 };
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
 
     // Parse options
     var opts = Options{};
@@ -31,32 +31,28 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
-        try stderr.print("Failed to initialize libgit2\n", .{});
-        std.process.exit(1);
+        return git.Error.InitFailed;
     }
     defer _ = c.git_libgit2_shutdown();
 
     // Open repository
     var repo: ?*c.git_repository = null;
     if (c.git_repository_open_ext(&repo, ".", 0, null) < 0) {
-        try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
-        std.process.exit(128);
+        return git.Error.NotARepository;
     }
     defer c.git_repository_free(repo);
 
     // Create revwalk
     var walk: ?*c.git_revwalk = null;
     if (c.git_revwalk_new(&walk, repo) < 0) {
-        try stderr.print("Failed to create revision walker\n", .{});
-        std.process.exit(1);
+        return git.Error.RevwalkFailed;
     }
     defer c.git_revwalk_free(walk);
 
     _ = c.git_revwalk_sorting(walk, c.GIT_SORT_TIME);
 
     if (c.git_revwalk_push_head(walk) < 0) {
-        try stderr.print("Failed to push HEAD\n", .{});
-        std.process.exit(1);
+        return git.Error.RevwalkFailed;
     }
 
     // Walk commits
@@ -87,14 +83,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
         defer c.git_commit_free(commit);
 
-        try printCommit(allocator, stdout, commit.?, &oid, opts);
+        printCommit(allocator, stdout, commit.?, &oid, opts) catch return git.Error.WriteFailed;
         count += 1;
     }
 
     // Show truncation message
     if (!opts.full and total > opts.max_count) {
         const remaining = total - opts.max_count;
-        try stdout.print("\n[{d} more commits, use -n to see more or --full for details]\n", .{remaining});
+        stdout.print("\n[{d} more commits, use -n to see more or --full for details]\n", .{remaining}) catch return git.Error.WriteFailed;
     }
 }
 

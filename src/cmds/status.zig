@@ -1,23 +1,21 @@
 const std = @import("std");
 const c = @cImport(@cInclude("git2.h"));
+const git = @import("git.zig");
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
     _ = args;
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
 
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
-        try stderr.print("Failed to initialize libgit2\n", .{});
-        std.process.exit(1);
+        return git.Error.InitFailed;
     }
     defer _ = c.git_libgit2_shutdown();
 
     // Open repository
     var repo: ?*c.git_repository = null;
     if (c.git_repository_open_ext(&repo, ".", 0, null) < 0) {
-        try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
-        std.process.exit(128);
+        return git.Error.NotARepository;
     }
     defer c.git_repository_free(repo);
 
@@ -30,7 +28,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         const branch_name = c.git_reference_shorthand(head);
         if (branch_name) |name| {
             const branch = std.mem.sliceTo(name, 0);
-            try stdout.print("branch: {s}", .{branch});
+            stdout.print("branch: {s}", .{branch}) catch return git.Error.WriteFailed;
 
             // Check upstream status
             var upstream: ?*c.git_reference = null;
@@ -46,22 +44,22 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                     _ = c.git_graph_ahead_behind(&ahead, &behind, repo, local_oid, upstream_oid);
 
                     if (ahead == 0 and behind == 0) {
-                        try stdout.print(" (up to date)", .{});
+                        stdout.print(" (up to date)", .{}) catch return git.Error.WriteFailed;
                     } else if (ahead > 0 and behind == 0) {
-                        try stdout.print(" (ahead {d})", .{ahead});
+                        stdout.print(" (ahead {d})", .{ahead}) catch return git.Error.WriteFailed;
                     } else if (behind > 0 and ahead == 0) {
-                        try stdout.print(" (behind {d})", .{behind});
+                        stdout.print(" (behind {d})", .{behind}) catch return git.Error.WriteFailed;
                     } else {
-                        try stdout.print(" (ahead {d}, behind {d})", .{ ahead, behind });
+                        stdout.print(" (ahead {d}, behind {d})", .{ ahead, behind }) catch return git.Error.WriteFailed;
                     }
                 }
             }
-            try stdout.print("\n", .{});
+            stdout.print("\n", .{}) catch return git.Error.WriteFailed;
         }
     } else if (head_err == c.GIT_EUNBORNBRANCH) {
-        try stdout.print("branch: (no commits yet)\n", .{});
+        stdout.print("branch: (no commits yet)\n", .{}) catch return git.Error.WriteFailed;
     } else {
-        try stdout.print("branch: HEAD detached\n", .{});
+        stdout.print("branch: HEAD detached\n", .{}) catch return git.Error.WriteFailed;
     }
 
     // Get status
@@ -74,15 +72,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         c.GIT_STATUS_OPT_SORT_CASE_SENSITIVELY;
 
     if (c.git_status_list_new(&status_list, repo, &opts) < 0) {
-        try stderr.print("Failed to get status\n", .{});
-        std.process.exit(1);
+        return git.Error.StatusFailed;
     }
     defer c.git_status_list_free(status_list);
 
     const count = c.git_status_list_entrycount(status_list);
 
     if (count == 0) {
-        try stdout.print("\nnothing to commit, working tree clean\n", .{});
+        stdout.print("\nnothing to commit, working tree clean\n", .{}) catch return git.Error.WriteFailed;
         return;
     }
 
@@ -107,7 +104,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         if (status & (c.GIT_STATUS_INDEX_NEW | c.GIT_STATUS_INDEX_MODIFIED | c.GIT_STATUS_INDEX_DELETED | c.GIT_STATUS_INDEX_RENAMED | c.GIT_STATUS_INDEX_TYPECHANGE) != 0) {
             if (diff_delta) |delta| {
                 const path = if (delta.*.new_file.path) |p| std.mem.sliceTo(p, 0) else "";
-                const marker = getIndexMarker(status);
+                const marker = git.indexMarker(status);
                 try staged.append(.{ .marker = marker, .path = path });
             }
         }
@@ -116,7 +113,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         if (status & (c.GIT_STATUS_WT_MODIFIED | c.GIT_STATUS_WT_DELETED | c.GIT_STATUS_WT_TYPECHANGE | c.GIT_STATUS_WT_RENAMED) != 0) {
             if (wt_delta) |delta| {
                 const path = if (delta.*.new_file.path) |p| std.mem.sliceTo(p, 0) else "";
-                const marker = getWtMarker(status);
+                const marker = git.workdirMarker(status);
                 try modified.append(.{ .marker = marker, .path = path });
             }
         }
@@ -132,30 +129,30 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Print staged
     if (staged.items.len > 0) {
-        try stdout.print("\nstaged: {d} files\n", .{staged.items.len});
+        stdout.print("\nstaged: {d} files\n", .{staged.items.len}) catch return git.Error.WriteFailed;
         for (staged.items) |file| {
-            try stdout.print("  {s} {s}\n", .{ file.marker, file.path });
+            stdout.print("  {s} {s}\n", .{ file.marker, file.path }) catch return git.Error.WriteFailed;
         }
     }
 
     // Print modified
     if (modified.items.len > 0) {
-        try stdout.print("\nmodified: {d} files\n", .{modified.items.len});
+        stdout.print("\nmodified: {d} files\n", .{modified.items.len}) catch return git.Error.WriteFailed;
         for (modified.items) |file| {
-            try stdout.print("  {s} {s}\n", .{ file.marker, file.path });
+            stdout.print("  {s} {s}\n", .{ file.marker, file.path }) catch return git.Error.WriteFailed;
         }
     }
 
     // Print untracked
     if (untracked.items.len > 0) {
-        try stdout.print("\nuntracked: {d} files\n", .{untracked.items.len});
+        stdout.print("\nuntracked: {d} files\n", .{untracked.items.len}) catch return git.Error.WriteFailed;
         const max_show: usize = 5;
         for (untracked.items, 0..) |file, idx| {
             if (idx >= max_show) {
-                try stdout.print("  + {d} more\n", .{untracked.items.len - max_show});
+                stdout.print("  + {d} more\n", .{untracked.items.len - max_show}) catch return git.Error.WriteFailed;
                 break;
             }
-            try stdout.print("  {s} {s}\n", .{ file.marker, file.path });
+            stdout.print("  {s} {s}\n", .{ file.marker, file.path }) catch return git.Error.WriteFailed;
         }
     }
 }
@@ -164,20 +161,3 @@ const FileStatus = struct {
     marker: []const u8,
     path: []const u8,
 };
-
-fn getIndexMarker(status: c_uint) []const u8 {
-    if (status & c.GIT_STATUS_INDEX_NEW != 0) return "A ";
-    if (status & c.GIT_STATUS_INDEX_MODIFIED != 0) return "M ";
-    if (status & c.GIT_STATUS_INDEX_DELETED != 0) return "D ";
-    if (status & c.GIT_STATUS_INDEX_RENAMED != 0) return "R ";
-    if (status & c.GIT_STATUS_INDEX_TYPECHANGE != 0) return "T ";
-    return "  ";
-}
-
-fn getWtMarker(status: c_uint) []const u8 {
-    if (status & c.GIT_STATUS_WT_MODIFIED != 0) return " M";
-    if (status & c.GIT_STATUS_WT_DELETED != 0) return " D";
-    if (status & c.GIT_STATUS_WT_RENAMED != 0) return " R";
-    if (status & c.GIT_STATUS_WT_TYPECHANGE != 0) return " T";
-    return "  ";
-}
