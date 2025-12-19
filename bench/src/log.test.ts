@@ -1,9 +1,10 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeAll } from "vitest";
 import { execFileSync } from "child_process";
 import { resolve } from "path";
+import { ensureFixture } from "../fixtures/setup";
 
 const ZAGI_BIN = resolve(__dirname, "../../zig-out/bin/zagi");
-const REPO_DIR = resolve(__dirname, "../..");
+let REPO_DIR: string;
 
 interface CommandResult {
   output: string;
@@ -28,6 +29,10 @@ function runCommand(cmd: string, args: string[]): CommandResult {
     lines: output.split("\n").filter((l) => l.length > 0).length,
   };
 }
+
+beforeAll(() => {
+  REPO_DIR = ensureFixture();
+});
 
 describe("zagi log", () => {
   test("produces smaller output than git log", () => {

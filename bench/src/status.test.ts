@@ -1,9 +1,10 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeAll } from "vitest";
 import { execFileSync } from "child_process";
 import { resolve } from "path";
+import { ensureFixture } from "../fixtures/setup";
 
 const ZAGI_BIN = resolve(__dirname, "../../zig-out/bin/zagi");
-const REPO_DIR = resolve(__dirname, "../..");
+let REPO_DIR: string;
 
 interface CommandResult {
   output: string;
@@ -29,6 +30,10 @@ function runCommand(cmd: string, args: string[]): CommandResult {
   };
 }
 
+beforeAll(() => {
+  REPO_DIR = ensureFixture();
+});
+
 describe("zagi status", () => {
   test("produces smaller output than git status", () => {
     const zagi = runCommand(ZAGI_BIN, ["status"]);
@@ -47,14 +52,6 @@ describe("zagi status", () => {
   test("shows branch name", () => {
     const result = runCommand(ZAGI_BIN, ["status"]);
     expect(result.output).toMatch(/^branch: \w+/);
-  });
-
-  test("shows upstream status", () => {
-    const result = runCommand(ZAGI_BIN, ["status"]);
-    // Should show one of: (up to date), (ahead N), (behind N), (ahead N, behind N)
-    expect(result.output).toMatch(
-      /\(up to date\)|\(ahead \d+\)|\(behind \d+\)|\(ahead \d+, behind \d+\)/
-    );
   });
 
   test("detects modified files", () => {

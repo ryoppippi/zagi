@@ -1,11 +1,10 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeAll, afterEach } from "vitest";
 import { execFileSync } from "child_process";
 import { resolve } from "path";
-import { writeFileSync, unlinkSync, existsSync } from "fs";
+import { ensureFixture } from "../fixtures/setup";
 
 const ZAGI_BIN = resolve(__dirname, "../../zig-out/bin/zagi");
-const REPO_DIR = resolve(__dirname, "../..");
-const TEST_FILE = resolve(REPO_DIR, "test-add-temp.txt");
+let REPO_DIR: string;
 
 interface CommandResult {
   output: string;
@@ -40,32 +39,31 @@ function runCommand(
   }
 }
 
+function reset() {
+  try {
+    execFileSync("git", ["reset", "HEAD", "."], { cwd: REPO_DIR });
+  } catch {}
+}
+
+beforeAll(() => {
+  REPO_DIR = ensureFixture();
+});
+
+afterEach(() => {
+  reset();
+});
+
 describe("zagi add", () => {
-  beforeEach(() => {
-    // Create a test file
-    writeFileSync(TEST_FILE, "test content\n");
-  });
-
-  afterEach(() => {
-    // Clean up test file and unstage
-    if (existsSync(TEST_FILE)) {
-      try {
-        execFileSync("git", ["reset", "HEAD", TEST_FILE], { cwd: REPO_DIR });
-      } catch {}
-      unlinkSync(TEST_FILE);
-    }
-  });
-
   test("shows confirmation after adding file", () => {
-    const result = runCommand(ZAGI_BIN, ["add", "test-add-temp.txt"]);
+    const result = runCommand(ZAGI_BIN, ["add", "src/new-file.ts"]);
 
     expect(result.output).toContain("staged:");
     expect(result.output).toContain("A ");
-    expect(result.output).toContain("test-add-temp.txt");
+    expect(result.output).toContain("new-file.ts");
   });
 
   test("shows count of staged files", () => {
-    const result = runCommand(ZAGI_BIN, ["add", "test-add-temp.txt"]);
+    const result = runCommand(ZAGI_BIN, ["add", "src/new-file.ts"]);
 
     expect(result.output).toMatch(/staged: \d+ file/);
   });
@@ -78,21 +76,16 @@ describe("zagi add", () => {
   });
 
   test("git add is silent on success", () => {
-    const git = runCommand("git", ["add", "test-add-temp.txt"]);
+    const git = runCommand("git", ["add", "src/new-file.ts"]);
 
     // git add produces no output on success
     expect(git.output).toBe("");
   });
 
   test("zagi add provides feedback while git add is silent", () => {
-    // Reset first
-    execFileSync("git", ["reset", "HEAD", "."], { cwd: REPO_DIR });
-
-    const zagi = runCommand(ZAGI_BIN, ["add", "test-add-temp.txt"]);
-    execFileSync("git", ["reset", "HEAD", "test-add-temp.txt"], {
-      cwd: REPO_DIR,
-    });
-    const git = runCommand("git", ["add", "test-add-temp.txt"]);
+    const zagi = runCommand(ZAGI_BIN, ["add", "src/new-file.ts"]);
+    reset();
+    const git = runCommand("git", ["add", "src/new-file.ts"]);
 
     expect(zagi.output.length).toBeGreaterThan(0);
     expect(git.output.length).toBe(0);
@@ -100,27 +93,15 @@ describe("zagi add", () => {
 });
 
 describe("performance", () => {
-  beforeEach(() => {
-    writeFileSync(TEST_FILE, "test content\n");
-  });
-
-  afterEach(() => {
-    if (existsSync(TEST_FILE)) {
-      try {
-        execFileSync("git", ["reset", "HEAD", TEST_FILE], { cwd: REPO_DIR });
-      } catch {}
-      unlinkSync(TEST_FILE);
-    }
-  });
-
   test("zagi add is reasonably fast", () => {
     const iterations = 10;
     const times: number[] = [];
 
     for (let i = 0; i < iterations; i++) {
-      execFileSync("git", ["reset", "HEAD", "."], { cwd: REPO_DIR });
-      const result = runCommand(ZAGI_BIN, ["add", "test-add-temp.txt"]);
-      times.push(result.duration);
+      reset();
+      const start = performance.now();
+      execFileSync(ZAGI_BIN, ["add", "src/new-file.ts"], { cwd: REPO_DIR });
+      times.push(performance.now() - start);
     }
 
     const avg = times.reduce((a, b) => a + b, 0) / times.length;

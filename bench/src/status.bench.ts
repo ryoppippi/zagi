@@ -1,9 +1,10 @@
 import { describe, bench } from "vitest";
 import { execFileSync } from "child_process";
 import { resolve } from "path";
+import { getFixturePath } from "../fixtures/setup";
 
 const ZAGI_BIN = resolve(__dirname, "../../zig-out/bin/zagi");
-const REPO_DIR = resolve(__dirname, "../..");
+const REPO_DIR = getFixturePath();
 
 function runCommand(cmd: string, args: string[]): string {
   return execFileSync(cmd, args, {
