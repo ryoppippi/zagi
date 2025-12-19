@@ -1,6 +1,17 @@
-# Zagi Development Flow
+# zagi
 
 This document describes the process for adding new git commands to zagi.
+
+## Requirements
+
+- Zig 0.15+
+- Bun (for integration tests)
+
+## Style
+
+- zagi is always lowercase
+- No emojis in code or output
+- Concise output optimized for agents
 
 ## Flow
 
@@ -139,7 +150,8 @@ cmd_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 ### 7. Build and run
 
 ```bash
-zig build
+zig build              # build
+zig build test         # run zig unit tests
 ./zig-out/bin/zagi <command>
 ```
 
@@ -172,7 +184,12 @@ describe("performance", () => {
 
 Run with:
 ```bash
-cd bench && bun test
+cd bench && bun i && bun test
+```
+
+To run all tests (Zig + TypeScript):
+```bash
+zig build test && cd bench && bun test
 ```
 
 ### 9. Optimize (if needed)
@@ -190,17 +207,23 @@ src/
   main.zig           # Entry point, command routing
   passthrough.zig    # Pass-through to git CLI
   cmds/
-    git.zig          # Shared utilities (markers, etc.)
+    git.zig          # Shared utilities (markers, errors)
     log.zig          # zagi log
     status.zig       # zagi status
+    diff.zig         # zagi diff
     add.zig          # zagi add
+    commit.zig       # zagi commit
     <command>.zig    # New commands
 
 bench/
   src/
-    log.test.ts      # log tests & benchmarks
-    status.test.ts   # status tests & benchmarks
-    add.test.ts      # add tests & benchmarks
+    log.test.ts      # log integration tests
+    status.test.ts   # status integration tests
+    diff.test.ts     # diff integration tests
+    add.test.ts      # add integration tests
+    commit.test.ts   # commit integration tests
+  fixtures/
+    setup.ts         # Test fixture repo creation
 ```
 
 ## Design Decisions
