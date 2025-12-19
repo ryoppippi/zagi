@@ -239,3 +239,103 @@ describe("zagi diff output format", () => {
     expect(result).not.toContain("diff --git");
   });
 });
+
+describe("zagi diff --stat", () => {
+  test("shows file names with change counts", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    // Format: " filename | N ++--"
+    expect(result).toMatch(/^\s+\S+\s+\|\s+\d+/m);
+  });
+
+  test("shows +/- visualization bar", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    // Should contain + or - in the output
+    expect(result).toMatch(/[+-]/);
+  });
+
+  test("shows summary line with file count", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    // Format: " N files changed, X insertions(+), Y deletions(-)"
+    expect(result).toMatch(/\d+ files changed/);
+  });
+
+  test("shows insertions count when present", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    expect(result).toMatch(/\d+ insertions?\(\+\)/);
+  });
+
+  test("--stat with no changes shows 'no changes'", () => {
+    // Reset all changes
+    execFileSync("git", ["checkout", "--", "."], { cwd: REPO_DIR });
+    execFileSync("git", ["clean", "-fd"], { cwd: REPO_DIR });
+
+    const result = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    expect(result).toBe("no changes\n");
+  });
+
+  test("--stat with --staged works", () => {
+    execFileSync("git", ["add", "src/main.ts"], { cwd: REPO_DIR });
+
+    const result = runCommand(ZAGI_BIN, ["diff", "--staged", "--stat"]);
+    expect(result).toContain("src/main.ts");
+    expect(result).toMatch(/files changed/);
+  });
+
+  test("--stat produces smaller output than patch mode", () => {
+    const stat = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    const patch = runCommand(ZAGI_BIN, ["diff"]);
+
+    expect(stat.length).toBeLessThan(patch.length);
+  });
+});
+
+describe("zagi diff --name-only", () => {
+  test("shows only file names", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--name-only"]);
+    // Should just be filenames, one per line
+    expect(result).toContain("src/main.ts");
+    // Should not have any diff content
+    expect(result).not.toMatch(/^\+/m);
+    expect(result).not.toMatch(/^-/m);
+  });
+
+  test("--name-only lists each file once", () => {
+    const result = runCommand(ZAGI_BIN, ["diff", "--name-only"]);
+    const lines = result.trim().split("\n").filter(Boolean);
+    const unique = new Set(lines);
+    expect(lines.length).toBe(unique.size);
+  });
+
+  test("--name-only with no changes shows 'no changes'", () => {
+    // Reset all changes
+    execFileSync("git", ["checkout", "--", "."], { cwd: REPO_DIR });
+    execFileSync("git", ["clean", "-fd"], { cwd: REPO_DIR });
+
+    const result = runCommand(ZAGI_BIN, ["diff", "--name-only"]);
+    expect(result).toBe("no changes\n");
+  });
+
+  test("--name-only with --staged works", () => {
+    execFileSync("git", ["add", "src/main.ts"], { cwd: REPO_DIR });
+
+    const result = runCommand(ZAGI_BIN, ["diff", "--staged", "--name-only"]);
+    expect(result.trim()).toBe("src/main.ts");
+  });
+
+  test("--name-only produces smallest output", () => {
+    const nameOnly = runCommand(ZAGI_BIN, ["diff", "--name-only"]);
+    const stat = runCommand(ZAGI_BIN, ["diff", "--stat"]);
+    const patch = runCommand(ZAGI_BIN, ["diff"]);
+
+    expect(nameOnly.length).toBeLessThanOrEqual(stat.length);
+    expect(nameOnly.length).toBeLessThan(patch.length);
+  });
+
+  test("--name-only with revision range", () => {
+    execFileSync("git", ["add", "."], { cwd: REPO_DIR });
+    execFileSync("git", ["commit", "-m", "test commit"], { cwd: REPO_DIR });
+
+    const result = runCommand(ZAGI_BIN, ["diff", "--name-only", "HEAD~1..HEAD"]);
+    expect(result).toContain("src/main.ts");
+  });
+});

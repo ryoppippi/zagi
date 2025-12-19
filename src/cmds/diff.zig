@@ -417,6 +417,40 @@ pub fn formatNoChanges(writer: anytype) !void {
     try writer.print("no changes\n", .{});
 }
 
+/// Format a single stat line: " filename | N ++--"
+pub fn formatStatLine(writer: anytype, path: []const u8, additions: usize, deletions: usize) !void {
+    const changes = additions + deletions;
+    try writer.print(" {s} | {d} ", .{ path, changes });
+
+    // Print +/- bar (max 20 chars)
+    const max_bar: usize = 20;
+    const total = if (changes > max_bar) max_bar else changes;
+    const plus_count = if (changes > 0) (additions * total) / changes else 0;
+    const minus_count = total - plus_count;
+
+    var i: usize = 0;
+    while (i < plus_count) : (i += 1) {
+        try writer.print("+", .{});
+    }
+    i = 0;
+    while (i < minus_count) : (i += 1) {
+        try writer.print("-", .{});
+    }
+    try writer.print("\n", .{});
+}
+
+/// Format the stat summary line: " N files changed, X insertions(+), Y deletions(-)"
+pub fn formatStatSummary(writer: anytype, files: usize, insertions: usize, deletions: usize) !void {
+    try writer.print(" {d} files changed", .{files});
+    if (insertions > 0) {
+        try writer.print(", {d} insertions(+)", .{insertions});
+    }
+    if (deletions > 0) {
+        try writer.print(", {d} deletions(-)", .{deletions});
+    }
+    try writer.print("\n", .{});
+}
+
 /// Parse a revision spec like "HEAD~2..HEAD" or "main...feature" into parts.
 /// Returns null for new if it's a single revision (diff to HEAD).
 /// triple_dot indicates merge-base semantics (changes since diverged).
@@ -574,4 +608,69 @@ test "parseRevSpec distinguishes double and triple dots" {
     try testing.expect(triple.triple_dot);
     try testing.expectEqualStrings("b", double.new.?);
     try testing.expectEqualStrings("b", triple.new.?);
+}
+
+test "formatStatLine with additions only" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatLine(output.writer(), "src/main.zig", 5, 0);
+
+    try testing.expectEqualStrings(" src/main.zig | 5 +++++\n", output.items);
+}
+
+test "formatStatLine with deletions only" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatLine(output.writer(), "old.txt", 0, 3);
+
+    try testing.expectEqualStrings(" old.txt | 3 ---\n", output.items);
+}
+
+test "formatStatLine with mixed changes" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatLine(output.writer(), "file.ts", 2, 2);
+
+    try testing.expectEqualStrings(" file.ts | 4 ++--\n", output.items);
+}
+
+test "formatStatLine caps bar at 20 chars" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatLine(output.writer(), "big.zig", 50, 50);
+
+    // Should have exactly 20 +/- chars (10 each for 50/50 split)
+    try testing.expect(std.mem.containsAtLeast(u8, output.items, 10, "+"));
+    try testing.expect(std.mem.containsAtLeast(u8, output.items, 10, "-"));
+}
+
+test "formatStatSummary with insertions and deletions" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatSummary(output.writer(), 3, 10, 5);
+
+    try testing.expectEqualStrings(" 3 files changed, 10 insertions(+), 5 deletions(-)\n", output.items);
+}
+
+test "formatStatSummary with only insertions" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatSummary(output.writer(), 1, 42, 0);
+
+    try testing.expectEqualStrings(" 1 files changed, 42 insertions(+)\n", output.items);
+}
+
+test "formatStatSummary with only deletions" {
+    var output = std.array_list.Managed(u8).init(testing.allocator);
+    defer output.deinit();
+
+    try formatStatSummary(output.writer(), 2, 0, 15);
+
+    try testing.expectEqualStrings(" 2 files changed, 15 deletions(-)\n", output.items);
 }
