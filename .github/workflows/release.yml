@@ -17,29 +17,47 @@ jobs:
           - os: ubuntu-latest
             target: native
             artifact: zagi-linux-x86_64
+            zig_url: https://ziglang.org/download/0.15.0/zig-linux-x86_64-0.15.0.tar.xz
+            zig_dir: zig-linux-x86_64-0.15.0
           - os: macos-13
             target: native
             artifact: zagi-macos-x86_64
+            zig_url: https://ziglang.org/download/0.15.0/zig-macos-x86_64-0.15.0.tar.xz
+            zig_dir: zig-macos-x86_64-0.15.0
           - os: macos-latest
             target: native
             artifact: zagi-macos-aarch64
+            zig_url: https://ziglang.org/download/0.15.0/zig-macos-aarch64-0.15.0.tar.xz
+            zig_dir: zig-macos-aarch64-0.15.0
           - os: windows-latest
             target: native
             artifact: zagi-windows-x86_64
+            zig_url: https://ziglang.org/download/0.15.0/zig-windows-x86_64-0.15.0.zip
+            zig_dir: zig-windows-x86_64-0.15.0
           # Cross-compile ARM Linux from x86 Linux
           - os: ubuntu-latest
             target: aarch64-linux-gnu
             artifact: zagi-linux-aarch64
+            zig_url: https://ziglang.org/download/0.15.0/zig-linux-x86_64-0.15.0.tar.xz
+            zig_dir: zig-linux-x86_64-0.15.0
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.0
+      - name: Install Zig (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          curl -L ${{ matrix.zig_url }} | tar -xJ
+          echo "$PWD/${{ matrix.zig_dir }}" >> $GITHUB_PATH
+
+      - name: Install Zig (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          curl -L -o zig.zip ${{ matrix.zig_url }}
+          unzip zig.zip
+          echo "$PWD/${{ matrix.zig_dir }}" >> $env:GITHUB_PATH
 
       - name: Build (native)
         if: matrix.target == 'native'
