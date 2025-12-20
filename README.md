@@ -5,9 +5,10 @@
 ## Why use zagi?
 
 - 121 git compatible commands
-- ~50% more concise output that doesn't overflow context windows
-- 1.5x and 2x faster than git
-- Non implemented commands pass through to system git
+- ~50% smaller output that doesn't overflow context windows
+- 1.5-2x faster than git in all implemented commands
+- Agent friendly features like `fork` and `prompt`
+- Git passthrough for non implemented commands
 
 ## Installation
 
@@ -75,18 +76,13 @@ git commit -m "Add feature" --prompt "Add a logout button to the header.."
 git log --prompts  # view prompts
 ```
 
-Commands zagi doesn't implement pass through to git:
+### Git passthrough
+
+Commands zagi doesn't implement pass through to git or use `-g` to force standard git output:
 
 ```bash
-git push           # runs standard git push
-git pull           # runs standard git pull
-```
-
-Use `-g` to force standard git output:
-
-```bash
-git -g log         # full git log output
-git -g diff        # full git diff output
+git -g log         # native git log output
+git --git diff     # native git diff output
 ```
 
 ## Output comparison
