@@ -2,10 +2,12 @@
 
 > a better git interface for agents
 
-- Familiar git interface for agents
-- Concise output that doesn't overflow context windows
-- Unrecognized commands pass through to system git
-- zagi is between 1.5x and 2x faster than git
+## Why use zagi?
+
+- 121 git compatible commands
+- ~50% more concise output that doesn't overflow context windows
+- 1.5x and 2x faster than git
+- Non implemented commands pass through to system git
 
 ## Installation
 
@@ -41,7 +43,7 @@ git commit -m "x"  # shows commit stats
 Store the AI prompt that created a commit:
 
 ```bash
-git commit -m "Add feature" --prompt "Add a logout button to the header"
+git commit -m "Add feature" --prompt "Add a logout button to the header.."
 git log --prompts  # view prompts
 ```
 
