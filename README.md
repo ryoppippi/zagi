@@ -57,10 +57,11 @@ cd .forks/nodejs-based
 cd .forks/bun-based
 # ... make changes, commit ...
 
-# Compare results, then promote the winner
+# Compare results, then pick the winner
 cd ../..
 git fork                       # list forks with commit counts
-git fork --promote bun-based   # hard checkout to base
+git fork --pick bun-based      # merge fork into base (keeps both histories)
+git fork --promote bun-based   # replace base with fork (discards base commits)
 
 # Clean up
 git fork --delete-all

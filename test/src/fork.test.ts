@@ -132,8 +132,8 @@ describe("git fork", () => {
   });
 });
 
-describe("git fork --pick", () => {
-  test("applies fork commits to main", () => {
+describe("git fork --promote", () => {
+  test("promotes fork commits to base", () => {
     runCommand(ZAGI_BIN, ["fork", "feature"]);
 
     // Make changes in fork
@@ -142,14 +142,14 @@ describe("git fork --pick", () => {
     execFileSync("git", ["add", "."], { cwd: forkDir });
     execFileSync("git", ["commit", "-m", "Update file"], { cwd: forkDir });
 
-    // Pick the fork
-    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "feature"]);
+    // Promote the fork
+    const result = runCommand(ZAGI_BIN, ["fork", "--promote", "feature"]);
 
-    expect(result.output).toContain("picked: feature");
+    expect(result.output).toContain("promoted: feature");
     expect(result.output).toContain("1 commit");
     expect(result.output).toContain("applied to base");
 
-    // Verify main has the changes
+    // Verify base has the changes
     const content = execFileSync("cat", ["file.txt"], {
       cwd: REPO_DIR,
       encoding: "utf-8",
@@ -160,7 +160,7 @@ describe("git fork --pick", () => {
   test("errors for non-existent fork", () => {
     const result = runCommand(
       ZAGI_BIN,
-      ["fork", "--pick", "nonexistent"],
+      ["fork", "--promote", "nonexistent"],
       undefined,
       true
     );
@@ -177,10 +177,10 @@ describe("git fork --pick", () => {
     writeFileSync(resolve(REPO_DIR, "local-changes.txt"), "my local work\n");
     writeFileSync(resolve(REPO_DIR, "file.txt"), "modified locally\n");
 
-    // Pick the fork (which has no commits ahead)
-    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "empty-fork"]);
+    // Promote the fork (which has no commits ahead)
+    const result = runCommand(ZAGI_BIN, ["fork", "--promote", "empty-fork"]);
 
-    expect(result.output).toContain("picked: empty-fork");
+    expect(result.output).toContain("promoted: empty-fork");
     expect(result.exitCode).toBe(0);
 
     // Verify local changes are preserved
@@ -209,10 +209,10 @@ describe("git fork --pick", () => {
     // Make local uncommitted changes in base to a DIFFERENT file
     writeFileSync(resolve(REPO_DIR, "local-work.txt"), "my local work\n");
 
-    // Pick the fork
-    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "feature"]);
+    // Promote the fork
+    const result = runCommand(ZAGI_BIN, ["fork", "--promote", "feature"]);
 
-    expect(result.output).toContain("picked: feature");
+    expect(result.output).toContain("promoted: feature");
     expect(result.exitCode).toBe(0);
 
     // Verify fork changes are applied
@@ -243,10 +243,10 @@ describe("git fork --pick", () => {
     // Make local uncommitted changes to the SAME file in base
     writeFileSync(resolve(REPO_DIR, "file.txt"), "local version\n");
 
-    // Pick should fail due to conflict
+    // Promote should fail due to conflict
     const result = runCommand(
       ZAGI_BIN,
-      ["fork", "--pick", "conflict"],
+      ["fork", "--promote", "conflict"],
       undefined,
       true
     );
@@ -310,12 +310,150 @@ describe("git fork --delete-all", () => {
   });
 });
 
+describe("git fork --pick", () => {
+  test("merges fork commits to base (fast-forward)", () => {
+    runCommand(ZAGI_BIN, ["fork", "feature"]);
+
+    // Make changes in fork
+    const forkDir = resolve(REPO_DIR, ".forks/feature");
+    writeFileSync(resolve(forkDir, "new.txt"), "new content\n");
+    execFileSync("git", ["add", "."], { cwd: forkDir });
+    execFileSync("git", ["commit", "-m", "Add new file"], { cwd: forkDir });
+
+    // Pick the fork (should fast-forward since base hasn't changed)
+    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "feature"]);
+
+    expect(result.output).toContain("picked: feature");
+    expect(result.output).toContain("fast-forward");
+    expect(result.exitCode).toBe(0);
+
+    // Verify base has the changes
+    const content = execFileSync("cat", ["new.txt"], {
+      cwd: REPO_DIR,
+      encoding: "utf-8",
+    });
+    expect(content).toBe("new content\n");
+  });
+
+  test("creates merge commit when base has diverged", () => {
+    runCommand(ZAGI_BIN, ["fork", "feature"]);
+
+    // Make changes in fork
+    const forkDir = resolve(REPO_DIR, ".forks/feature");
+    writeFileSync(resolve(forkDir, "fork-file.txt"), "fork content\n");
+    execFileSync("git", ["add", "."], { cwd: forkDir });
+    execFileSync("git", ["commit", "-m", "Fork commit"], { cwd: forkDir });
+
+    // Make different changes in base (diverge)
+    writeFileSync(resolve(REPO_DIR, "base-file.txt"), "base content\n");
+    execFileSync("git", ["add", "."], { cwd: REPO_DIR });
+    execFileSync("git", ["commit", "-m", "Base commit"], { cwd: REPO_DIR });
+
+    // Pick the fork (should create merge commit)
+    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "feature"]);
+
+    expect(result.output).toContain("picked: feature");
+    expect(result.output).toContain("merged");
+    expect(result.exitCode).toBe(0);
+
+    // Verify both files exist (merge succeeded)
+    expect(existsSync(resolve(REPO_DIR, "fork-file.txt"))).toBe(true);
+    expect(existsSync(resolve(REPO_DIR, "base-file.txt"))).toBe(true);
+
+    // Verify merge commit was created (should have 2 parents)
+    const logOutput = execFileSync(
+      "git",
+      ["log", "--oneline", "--merges", "-1"],
+      {
+        cwd: REPO_DIR,
+        encoding: "utf-8",
+      }
+    );
+    expect(logOutput).toContain("Merge fork");
+  });
+
+  test("reports already up to date", () => {
+    runCommand(ZAGI_BIN, ["fork", "empty-fork"]);
+
+    // Pick without making any changes in fork
+    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "empty-fork"]);
+
+    expect(result.output).toContain("already up to date");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("handles merge conflicts gracefully", () => {
+    runCommand(ZAGI_BIN, ["fork", "conflict"]);
+
+    // Make changes in fork to file.txt
+    const forkDir = resolve(REPO_DIR, ".forks/conflict");
+    writeFileSync(resolve(forkDir, "file.txt"), "fork version\n");
+    execFileSync("git", ["add", "."], { cwd: forkDir });
+    execFileSync("git", ["commit", "-m", "Fork change"], { cwd: forkDir });
+
+    // Make conflicting changes to same file in base
+    writeFileSync(resolve(REPO_DIR, "file.txt"), "base version\n");
+    execFileSync("git", ["add", "."], { cwd: REPO_DIR });
+    execFileSync("git", ["commit", "-m", "Base change"], { cwd: REPO_DIR });
+
+    // Pick should succeed but report conflicts
+    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "conflict"]);
+
+    expect(result.output).toContain("picked: conflict");
+    expect(result.output).toContain("conflicts");
+    expect(result.output).toContain("resolve conflicts");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("errors for non-existent fork", () => {
+    const result = runCommand(
+      ZAGI_BIN,
+      ["fork", "--pick", "nonexistent"],
+      undefined,
+      true
+    );
+
+    expect(result.output).toContain("not found");
+    expect(result.exitCode).toBe(128);
+  });
+
+  test("preserves local uncommitted changes", () => {
+    runCommand(ZAGI_BIN, ["fork", "feature"]);
+
+    // Make changes in fork to a different file
+    const forkDir = resolve(REPO_DIR, ".forks/feature");
+    writeFileSync(resolve(forkDir, "new-feature.txt"), "feature content\n");
+    execFileSync("git", ["add", "."], { cwd: forkDir });
+    execFileSync("git", ["commit", "-m", "Add feature"], { cwd: forkDir });
+
+    // Make local uncommitted changes in base
+    writeFileSync(resolve(REPO_DIR, "local-work.txt"), "my local work\n");
+
+    // Pick the fork
+    const result = runCommand(ZAGI_BIN, ["fork", "--pick", "feature"]);
+
+    expect(result.output).toContain("picked: feature");
+    expect(result.exitCode).toBe(0);
+
+    // Verify fork changes are applied
+    expect(existsSync(resolve(REPO_DIR, "new-feature.txt"))).toBe(true);
+
+    // Verify local uncommitted changes are preserved
+    const localFile = execFileSync("cat", ["local-work.txt"], {
+      cwd: REPO_DIR,
+      encoding: "utf-8",
+    });
+    expect(localFile).toBe("my local work\n");
+  });
+});
+
 describe("git fork --help", () => {
   test("shows help", () => {
     const result = runCommand(ZAGI_BIN, ["fork", "--help"]);
 
     expect(result.output).toContain("usage:");
     expect(result.output).toContain("--pick");
+    expect(result.output).toContain("--promote");
     expect(result.output).toContain("--delete");
     expect(result.output).toContain("--delete-all");
   });

@@ -96,14 +96,19 @@ Options:
 Manage parallel working copies for experimentation.
 
 ```bash
-git fork feature-a       # create fork in .forks/feature-a/
-git fork                  # list forks with commit counts
-git fork --pick feature-a # apply fork's commits to base
+git fork feature-a          # create fork in .forks/feature-a/
+git fork                     # list forks with commit counts
+git fork --pick feature-a    # merge fork into base (safe)
+git fork --promote feature-a # hard checkout fork to base (destructive)
 git fork --delete feature-a
 git fork --delete-all
 ```
 
 Forks are git worktrees. The `.forks/` directory is auto-added to `.gitignore`.
+
+**Picking vs Promoting:**
+- `--pick` performs a proper git merge, preserving both base and fork history
+- `--promote` moves HEAD to the fork's commit, discarding any base-only commits (stash uncommitted changes first)
 
 ### --prompt
 

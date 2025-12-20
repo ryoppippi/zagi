@@ -8,11 +8,12 @@ pub const help =
     \\Manage parallel working copies for experimentation.
     \\
     \\Commands:
-    \\  git fork <name>          Create a new fork in .forks/<name>/
-    \\  git fork                 List existing forks
-    \\  git fork --pick <name>   Apply fork's commits to base
-    \\  git fork --delete <name> Delete a specific fork
-    \\  git fork --delete-all    Delete all forks
+    \\  git fork <name>             Create a new fork in .forks/<name>/
+    \\  git fork                    List existing forks
+    \\  git fork --pick <name>      Merge fork into base (safe)
+    \\  git fork --promote <name>   Hard checkout fork to base (destructive)
+    \\  git fork --delete <name>    Delete a specific fork
+    \\  git fork --delete-all       Delete all forks
     \\
     \\Forks are ephemeral worktrees for parallel experimentation.
     \\
@@ -24,6 +25,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
     // Parse arguments
     var fork_name: ?[]const u8 = null;
     var pick_name: ?[]const u8 = null;
+    var promote_name: ?[]const u8 = null;
     var delete_name: ?[]const u8 = null;
     var delete_all = false;
 
@@ -39,6 +41,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
             pick_name = std.mem.sliceTo(args[i], 0);
         } else if (std.mem.startsWith(u8, arg, "--pick=")) {
             pick_name = arg[7..];
+        } else if (std.mem.eql(u8, arg, "--promote")) {
+            i += 1;
+            if (i >= args.len) {
+                return git.Error.UsageError;
+            }
+            promote_name = std.mem.sliceTo(args[i], 0);
+        } else if (std.mem.startsWith(u8, arg, "--promote=")) {
+            promote_name = arg[10..];
         } else if (std.mem.eql(u8, arg, "--delete")) {
             i += 1;
             if (i >= args.len) {
@@ -82,6 +92,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
     // Dispatch to action
     if (pick_name) |name| {
         try pickFork(allocator, repo, name, stdout);
+    } else if (promote_name) |name| {
+        try promoteFork(allocator, repo, name, stdout);
     } else if (delete_name) |name| {
         try deleteFork(allocator, repo, name, stdout);
     } else if (delete_all) {
@@ -318,6 +330,214 @@ fn getCommitsAhead(allocator: std.mem.Allocator, repo: ?*c.git_repository, fork_
 }
 
 fn pickFork(allocator: std.mem.Allocator, repo: ?*c.git_repository, name: []const u8, stdout: anytype) !void {
+    _ = allocator;
+
+    // Get the fork's branch ref
+    var branch_name_buf: [512]u8 = undefined;
+    const branch_name = std.fmt.bufPrint(&branch_name_buf, "refs/heads/{s}", .{name}) catch return git.Error.WriteFailed;
+
+    var branch_name_z: [512]u8 = undefined;
+    @memcpy(branch_name_z[0..branch_name.len], branch_name);
+    branch_name_z[branch_name.len] = 0;
+
+    var fork_ref: ?*c.git_reference = null;
+    if (c.git_reference_lookup(&fork_ref, repo, &branch_name_z) < 0) {
+        stdout.print("error: fork '{s}' not found\n", .{name}) catch {};
+        return git.Error.FileNotFound;
+    }
+    defer c.git_reference_free(fork_ref);
+
+    // Create annotated commit for the fork
+    var annotated_commit: ?*c.git_annotated_commit = null;
+    if (c.git_annotated_commit_from_ref(&annotated_commit, repo, fork_ref) < 0) {
+        stdout.print("error: failed to get fork commit\n", .{}) catch {};
+        return git.Error.RevwalkFailed;
+    }
+    defer c.git_annotated_commit_free(annotated_commit);
+
+    // Analyze the merge
+    var analysis: c.git_merge_analysis_t = 0;
+    var preference: c.git_merge_preference_t = 0;
+    var annotated_commits = [_]?*c.git_annotated_commit{annotated_commit};
+
+    if (c.git_merge_analysis(&analysis, &preference, repo, @ptrCast(&annotated_commits), 1) < 0) {
+        stdout.print("error: merge analysis failed\n", .{}) catch {};
+        return git.Error.RevwalkFailed;
+    }
+
+    // Check if already up-to-date
+    if ((analysis & c.GIT_MERGE_ANALYSIS_UP_TO_DATE) != 0) {
+        stdout.print("already up to date with {s}\n", .{name}) catch {};
+        return;
+    }
+
+    // Handle fast-forward
+    if ((analysis & c.GIT_MERGE_ANALYSIS_FASTFORWARD) != 0) {
+        const target_oid = c.git_annotated_commit_id(annotated_commit);
+
+        // Get the target commit and its tree for checkout
+        var target_commit: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&target_commit, repo, target_oid) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_commit_free(target_commit);
+
+        var target_tree: ?*c.git_tree = null;
+        if (c.git_commit_tree(&target_tree, target_commit) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_tree_free(target_tree);
+
+        // Checkout the tree BEFORE updating HEAD (preserves local changes)
+        var checkout_opts = std.mem.zeroes(c.git_checkout_options);
+        checkout_opts.version = c.GIT_CHECKOUT_OPTIONS_VERSION;
+        checkout_opts.checkout_strategy = c.GIT_CHECKOUT_SAFE;
+
+        if (c.git_checkout_tree(repo, @ptrCast(target_tree), &checkout_opts) < 0) {
+            const err = c.git_error_last();
+            if (err != null) {
+                const msg = std.mem.sliceTo(err.*.message, 0);
+                stdout.print("error: {s}\n", .{msg}) catch {};
+                stdout.print("hint: commit or stash changes first\n", .{}) catch {};
+            }
+            return git.Error.WriteFailed;
+        }
+
+        // Get HEAD ref
+        var head_ref: ?*c.git_reference = null;
+        if (c.git_repository_head(&head_ref, repo) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_reference_free(head_ref);
+
+        // Fast-forward HEAD to target
+        var new_ref: ?*c.git_reference = null;
+        const ref_name = c.git_reference_name(head_ref);
+        if (c.git_reference_create(&new_ref, repo, ref_name, target_oid, 1, "fork --pick (fast-forward)") < 0) {
+            stdout.print("error: fast-forward failed\n", .{}) catch {};
+            return git.Error.WriteFailed;
+        }
+        if (new_ref != null) c.git_reference_free(new_ref);
+
+        stdout.print("picked: {s} (fast-forward)\n", .{name}) catch return git.Error.WriteFailed;
+        return;
+    }
+
+    // Normal merge
+    if ((analysis & c.GIT_MERGE_ANALYSIS_NORMAL) != 0) {
+        var merge_opts = std.mem.zeroes(c.git_merge_options);
+        merge_opts.version = c.GIT_MERGE_OPTIONS_VERSION;
+
+        var checkout_opts = std.mem.zeroes(c.git_checkout_options);
+        checkout_opts.version = c.GIT_CHECKOUT_OPTIONS_VERSION;
+        checkout_opts.checkout_strategy = c.GIT_CHECKOUT_SAFE | c.GIT_CHECKOUT_ALLOW_CONFLICTS;
+
+        // Perform the merge
+        if (c.git_merge(repo, @ptrCast(&annotated_commits), 1, &merge_opts, &checkout_opts) < 0) {
+            const err = c.git_error_last();
+            if (err != null) {
+                const msg = std.mem.sliceTo(err.*.message, 0);
+                stdout.print("error: {s}\n", .{msg}) catch {};
+            }
+            return git.Error.WriteFailed;
+        }
+
+        // Check for conflicts
+        var index: ?*c.git_index = null;
+        if (c.git_repository_index(&index, repo) < 0) {
+            return git.Error.IndexOpenFailed;
+        }
+        defer c.git_index_free(index);
+
+        if (c.git_index_has_conflicts(index) != 0) {
+            stdout.print("picked: {s} (conflicts)\n", .{name}) catch {};
+            stdout.print("  resolve conflicts and commit manually\n", .{}) catch {};
+            return;
+        }
+
+        // No conflicts - create merge commit
+        var tree_oid: c.git_oid = undefined;
+        if (c.git_index_write_tree(&tree_oid, index) < 0) {
+            return git.Error.IndexWriteFailed;
+        }
+
+        var tree: ?*c.git_tree = null;
+        if (c.git_tree_lookup(&tree, repo, &tree_oid) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_tree_free(tree);
+
+        // Get signature
+        var signature: ?*c.git_signature = null;
+        if (c.git_signature_default(&signature, repo) < 0) {
+            return git.Error.CommitFailed;
+        }
+        defer c.git_signature_free(signature);
+
+        // Get HEAD commit
+        var head_ref: ?*c.git_reference = null;
+        if (c.git_repository_head(&head_ref, repo) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_reference_free(head_ref);
+
+        var head_commit: ?*c.git_commit = null;
+        if (c.git_reference_peel(@ptrCast(&head_commit), head_ref, c.GIT_OBJECT_COMMIT) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_commit_free(head_commit);
+
+        // Get fork commit
+        var fork_commit: ?*c.git_commit = null;
+        const fork_oid = c.git_annotated_commit_id(annotated_commit);
+        if (c.git_commit_lookup(&fork_commit, repo, fork_oid) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+        defer c.git_commit_free(fork_commit);
+
+        // Create merge commit message
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Merge fork '{s}'", .{name}) catch return git.Error.WriteFailed;
+        var msg_z: [256]u8 = undefined;
+        @memcpy(msg_z[0..msg.len], msg);
+        msg_z[msg.len] = 0;
+
+        // Create merge commit with two parents
+        var commit_oid: c.git_oid = undefined;
+        var parents = [_]?*c.git_commit{ head_commit, fork_commit };
+
+        if (c.git_commit_create(
+            &commit_oid,
+            repo,
+            "HEAD",
+            signature,
+            signature,
+            null,
+            &msg_z,
+            tree,
+            2,
+            @ptrCast(&parents),
+        ) < 0) {
+            const err = c.git_error_last();
+            if (err != null) {
+                const msg2 = std.mem.sliceTo(err.*.message, 0);
+                stdout.print("error: {s}\n", .{msg2}) catch {};
+            }
+            return git.Error.CommitFailed;
+        }
+
+        // Clean up merge state
+        _ = c.git_repository_state_cleanup(repo);
+
+        stdout.print("picked: {s} (merged)\n", .{name}) catch return git.Error.WriteFailed;
+        return;
+    }
+
+    stdout.print("error: cannot merge {s}\n", .{name}) catch {};
+    return git.Error.WriteFailed;
+}
+
+fn promoteFork(allocator: std.mem.Allocator, repo: ?*c.git_repository, name: []const u8, stdout: anytype) !void {
     // Get commits ahead count first
     const ahead = getCommitsAhead(allocator, repo, name) catch 0;
 
@@ -403,7 +623,7 @@ fn pickFork(allocator: std.mem.Allocator, repo: ?*c.git_repository, name: []cons
     }
 
     var new_ref: ?*c.git_reference = null;
-    if (c.git_reference_create(&new_ref, repo, ref_name, fork_oid, 1, "fork --pick") < 0) {
+    if (c.git_reference_create(&new_ref, repo, ref_name, fork_oid, 1, "fork --promote") < 0) {
         const err = c.git_error_last();
         if (err != null) {
             const msg = std.mem.sliceTo(err.*.message, 0);
@@ -413,7 +633,7 @@ fn pickFork(allocator: std.mem.Allocator, repo: ?*c.git_repository, name: []cons
     }
     if (new_ref != null) c.git_reference_free(new_ref);
 
-    stdout.print("picked: {s}\n", .{name}) catch return git.Error.WriteFailed;
+    stdout.print("promoted: {s}\n", .{name}) catch return git.Error.WriteFailed;
     if (ahead > 0) {
         stdout.print("  {d} commit{s} applied to base\n", .{
             ahead,
