@@ -13,6 +13,36 @@ This document describes the process for adding new git commands to zagi.
 - No emojis in code or output
 - Concise output optimized for agents
 
+## Committing with Prompts
+
+When committing code, **always include the complete user prompt** that created the change:
+
+```bash
+git commit -m "<commit-message>" --prompt "<complete-user-prompt-for-this-commit>"
+```
+
+The `--prompt` should contain the **full user request** that led to this commit, not a summary. This preserves context for code review.
+
+Example:
+```bash
+git commit -m "Add logout button" --prompt "Add a logout button to the header. When clicked it should clear the session and redirect to /login"
+```
+
+View prompts with:
+```bash
+git log --prompts
+```
+
+### Environment Setup
+
+Set `ZAGI_AGENT` to enable prompt enforcement:
+
+```bash
+export ZAGI_AGENT=claude-code
+```
+
+When this is set, `git commit` will fail without `--prompt`, ensuring all AI-generated commits have their prompts recorded.
+
 ## Flow
 
 ### 1. Investigate the git command

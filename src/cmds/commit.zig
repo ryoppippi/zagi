@@ -3,14 +3,18 @@ const c = @cImport(@cInclude("git2.h"));
 const git = @import("git.zig");
 
 pub const help =
-    \\usage: git commit -m <message> [-a] [--amend]
+    \\usage: git commit -m <message> [-a] [--amend] [--prompt <text>]
     \\
     \\Create a commit from staged changes.
     \\
     \\Options:
-    \\  -m <msg>   Commit message (required unless --amend)
-    \\  -a         Stage all modified tracked files before commit
-    \\  --amend    Amend the previous commit
+    \\  -m <msg>       Commit message (required unless --amend)
+    \\  -a             Stage all modified tracked files before commit
+    \\  --amend        Amend the previous commit
+    \\  --prompt <p>   Store the complete user prompt that created this commit
+    \\
+    \\Environment:
+    \\  ZAGI_AGENT=<name>   Declare agent operator (requires --prompt)
     \\
 ;
 
@@ -21,6 +25,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
     var message: ?[]const u8 = null;
     var amend = false;
     var all = false;
+    var prompt: ?[]const u8 = null;
 
     var i: usize = 2; // Skip "zagi" and "commit"
     while (i < args.len) : (i += 1) {
@@ -41,6 +46,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
             amend = true;
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
             all = true;
+        } else if (std.mem.eql(u8, arg, "--prompt")) {
+            i += 1;
+            if (i >= args.len) {
+                return git.Error.UsageError;
+            }
+            prompt = std.mem.sliceTo(args[i], 0);
+        } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
+            prompt = arg[9..];
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             stdout.print("{s}", .{help}) catch {};
             return;
@@ -52,6 +65,13 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
 
     // Message is required (unless amending)
     if (message == null and !amend) {
+        return git.Error.UsageError;
+    }
+
+    // Check if prompt is required (when running as an AI agent)
+    if (std.posix.getenv("ZAGI_AGENT") != null and prompt == null) {
+        stdout.print("error: --prompt required (ZAGI_AGENT is set)\n", .{}) catch {};
+        stdout.print("hint: use --prompt to record the prompt that created this commit\n", .{}) catch {};
         return git.Error.UsageError;
     }
 
@@ -196,6 +216,28 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
         }
     }
 
+    // Store prompt as git note if provided
+    if (prompt) |p| {
+        // Copy prompt to null-terminated buffer
+        var prompt_buf: [8192]u8 = undefined;
+        if (p.len < prompt_buf.len) {
+            @memcpy(prompt_buf[0..p.len], p);
+            prompt_buf[p.len] = 0;
+
+            var note_oid: c.git_oid = undefined;
+            _ = c.git_note_create(
+                &note_oid,
+                repo,
+                "refs/notes/prompts", // Custom namespace for AI prompts
+                signature,
+                signature,
+                &commit_oid,
+                &prompt_buf,
+                0, // Don't force overwrite
+            );
+        }
+    }
+
     // Format output
     var hash_buf: [8]u8 = undefined;
     _ = c.git_oid_tostr(&hash_buf, hash_buf.len, &commit_oid);
@@ -212,6 +254,9 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
             stats.insertions,
             stats.deletions,
         }) catch return git.Error.WriteFailed;
+    }
+    if (prompt != null) {
+        stdout.print("  prompt saved\n", .{}) catch return git.Error.WriteFailed;
     }
 }
 

@@ -4,7 +4,7 @@ const git = @import("git.zig");
 
 pub const help =
     \\usage: git log [-n <count>] [--author=<pattern>] [--grep=<pattern>]
-    \\               [--since=<date>] [--until=<date>] [-- <path>...]
+    \\               [--since=<date>] [--until=<date>] [--prompts] [-- <path>...]
     \\
     \\Show commit history.
     \\
@@ -14,6 +14,7 @@ pub const help =
     \\  --grep=<pat>     Filter by commit message
     \\  --since=<date>   Show commits after date (e.g. 2025-01-01, "1 week ago")
     \\  --until=<date>   Show commits before date
+    \\  --prompts        Show AI prompts attached to commits
     \\  -- <path>...     Show commits affecting paths
     \\
 ;
@@ -28,6 +29,7 @@ const Options = struct {
     until: ?i64 = null,
     pathspecs: [MAX_PATHSPECS][*c]u8 = undefined,
     pathspec_count: usize = 0,
+    show_prompts: bool = false,
 };
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
@@ -85,6 +87,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
             return;
         } else if (std.mem.eql(u8, arg, "--oneline")) {
             // Already one-line format by default, ignore
+        } else if (std.mem.eql(u8, arg, "--prompts")) {
+            opts.show_prompts = true;
         } else if (std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--")) {
             // Unknown flag - passthrough to git
             return git.Error.UnsupportedFlag;
@@ -161,7 +165,7 @@ fn printCommit(
     writer: anytype,
     commit: *c.git_commit,
     oid: *const c.git_oid,
-    _: Options,
+    opts: Options,
 ) !void {
     var sha_buf: [41]u8 = undefined;
     _ = c.git_oid_tostr(&sha_buf, sha_buf.len, oid);
@@ -190,6 +194,26 @@ fn printCommit(
         try writer.print("{s} ({s}) {s}: {s}\n", .{ sha[0..7], date_str, first_name, subject });
     } else {
         try writer.print("{s} {s}\n", .{ sha[0..7], subject });
+    }
+
+    // Show prompt note if requested
+    if (opts.show_prompts) {
+        const repo = c.git_commit_owner(commit);
+        var note: ?*c.git_note = null;
+        if (c.git_note_read(&note, repo, "refs/notes/prompts", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const prompt_text = std.mem.sliceTo(msg, 0);
+                // Truncate long prompts for display
+                const max_len: usize = 200;
+                if (prompt_text.len > max_len) {
+                    try writer.print("  prompt: {s}...\n", .{prompt_text[0..max_len]});
+                } else {
+                    try writer.print("  prompt: {s}\n", .{prompt_text});
+                }
+            }
+        }
     }
 }
 

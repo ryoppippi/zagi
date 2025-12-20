@@ -36,6 +36,15 @@ git add .          # confirms what was staged
 git commit -m "x"  # shows commit stats
 ```
 
+### Prompt tracking
+
+Store the AI prompt that created a commit:
+
+```bash
+git commit -m "Add feature" --prompt "Add a logout button to the header"
+git log --prompts  # view prompts
+```
+
 Commands zagi doesn't implement pass through to git:
 
 ```bash
