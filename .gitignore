@@ -2,3 +2,4 @@
 zig-out
 test/fixtures/repos/
 todo.md
+.forks/
