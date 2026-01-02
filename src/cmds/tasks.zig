@@ -654,12 +654,74 @@ fn runDone(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = allocator;
-    _ = args;
-    _ = repo;
-
+    _ = args; // No additional args needed for ready
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("tasks ready: not implemented yet\n", .{}) catch {};
+
+    // Load task list from git ref
+    var task_list = loadTaskList(repo, allocator) catch |err| {
+        stdout.print("error: failed to load tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+    defer task_list.deinit(allocator);
+
+    // If no tasks, show empty state
+    if (task_list.tasks.items.len == 0) {
+        stdout.print("no tasks found\n", .{}) catch {};
+        return;
+    }
+
+    // Build a map of task ID -> completion status for dependency checking
+    var completed_tasks = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
+    defer completed_tasks.deinit();
+
+    for (task_list.tasks.items) |task| {
+        const is_completed = std.mem.eql(u8, task.status, "completed");
+        completed_tasks.put(task.id, is_completed) catch return Error.AllocationError;
+    }
+
+    // Find tasks that are ready (pending and no unmet dependencies)
+    var ready_tasks = std.ArrayList(Task){};
+    defer ready_tasks.deinit(allocator);
+
+    for (task_list.tasks.items) |task| {
+        // Skip completed tasks
+        if (std.mem.eql(u8, task.status, "completed")) {
+            continue;
+        }
+
+        // Check if this task is ready
+        var is_ready = true;
+
+        // If task has a dependency, check if it's completed
+        if (task.after) |dependency_id| {
+            if (completed_tasks.get(dependency_id)) |is_dep_completed| {
+                if (!is_dep_completed) {
+                    is_ready = false;
+                }
+            } else {
+                // Dependency doesn't exist - this is an error state, but we'll treat it as not ready
+                is_ready = false;
+            }
+        }
+
+        if (is_ready) {
+            ready_tasks.append(allocator, task) catch return Error.AllocationError;
+        }
+    }
+
+    // If no ready tasks, show empty state
+    if (ready_tasks.items.len == 0) {
+        stdout.print("no ready tasks (all tasks are either completed or waiting on dependencies)\n", .{}) catch {};
+        return;
+    }
+
+    // Display ready task count
+    stdout.print("ready: {} task{s}\n\n", .{ ready_tasks.items.len, if (ready_tasks.items.len == 1) "" else "s" }) catch {};
+
+    // List ready tasks with compact format
+    for (ready_tasks.items) |task| {
+        stdout.print("[ ] {s}\n  {s}\n", .{ task.id, task.content }) catch {};
+    }
 }
 
 fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
