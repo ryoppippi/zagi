@@ -725,12 +725,108 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
 }
 
 fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = allocator;
-    _ = args;
-    _ = repo;
-
+    _ = args; // No additional args needed for pr
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("tasks pr: not implemented yet\n", .{}) catch {};
+
+    // Load task list from git ref
+    var task_list = loadTaskList(repo, allocator) catch |err| {
+        stdout.print("error: failed to load tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+    defer task_list.deinit(allocator);
+
+    // If no tasks, show empty state
+    if (task_list.tasks.items.len == 0) {
+        stdout.print("## Tasks\n\nNo tasks found.\n", .{}) catch {};
+        return;
+    }
+
+    // Separate tasks by status and build dependency map
+    var completed_tasks = std.ArrayList(Task){};
+    var pending_tasks = std.ArrayList(Task){};
+    defer completed_tasks.deinit(allocator);
+    defer pending_tasks.deinit(allocator);
+
+    var completed_map = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
+    defer completed_map.deinit();
+
+    for (task_list.tasks.items) |task| {
+        if (std.mem.eql(u8, task.status, "completed")) {
+            completed_tasks.append(allocator, task) catch return Error.AllocationError;
+            completed_map.put(task.id, true) catch return Error.AllocationError;
+        } else {
+            pending_tasks.append(allocator, task) catch return Error.AllocationError;
+            completed_map.put(task.id, false) catch return Error.AllocationError;
+        }
+    }
+
+    // Generate PR markdown
+    stdout.print("## Tasks\n\n", .{}) catch {};
+
+    // Show completed tasks
+    if (completed_tasks.items.len > 0) {
+        stdout.print("### Completed\n\n", .{}) catch {};
+        for (completed_tasks.items) |task| {
+            if (task.after) |after_id| {
+                stdout.print("- [x] {s} (after {s})\n", .{ task.content, after_id }) catch {};
+            } else {
+                stdout.print("- [x] {s}\n", .{ task.content }) catch {};
+            }
+        }
+        stdout.print("\n", .{}) catch {};
+    }
+
+    // Show pending tasks, grouped by ready vs blocked
+    if (pending_tasks.items.len > 0) {
+        var ready_tasks = std.ArrayList(Task){};
+        var blocked_tasks = std.ArrayList(Task){};
+        defer ready_tasks.deinit(allocator);
+        defer blocked_tasks.deinit(allocator);
+
+        for (pending_tasks.items) |task| {
+            var is_ready = true;
+
+            // Check if this task is blocked by dependencies
+            if (task.after) |dependency_id| {
+                if (completed_map.get(dependency_id)) |is_dep_completed| {
+                    if (!is_dep_completed) {
+                        is_ready = false;
+                    }
+                } else {
+                    // Dependency doesn't exist - treat as blocked
+                    is_ready = false;
+                }
+            }
+
+            if (is_ready) {
+                ready_tasks.append(allocator, task) catch return Error.AllocationError;
+            } else {
+                blocked_tasks.append(allocator, task) catch return Error.AllocationError;
+            }
+        }
+
+        // Show ready tasks first
+        if (ready_tasks.items.len > 0) {
+            stdout.print("### Ready\n\n", .{}) catch {};
+            for (ready_tasks.items) |task| {
+                stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
+            }
+            stdout.print("\n", .{}) catch {};
+        }
+
+        // Show blocked tasks
+        if (blocked_tasks.items.len > 0) {
+            stdout.print("### Blocked\n\n", .{}) catch {};
+            for (blocked_tasks.items) |task| {
+                if (task.after) |after_id| {
+                    stdout.print("- [ ] {s} (after {s})\n", .{ task.content, after_id }) catch {};
+                } else {
+                    stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
+                }
+            }
+            stdout.print("\n", .{}) catch {};
+        }
+    }
 }
 
 // Tests
