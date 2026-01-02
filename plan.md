@@ -1,0 +1,17 @@
+# Plan: Implement git tasks
+
+## Tasks
+
+- [x] Create src/cmds/tasks.zig with basic structure and help text
+- [x] Implement git ref storage helpers (read/write refs/tasks/<branch>)
+- [ ] Implement `git tasks add <content>` - create task with flat ID
+- [ ] Implement `git tasks list` - list all tasks from ref
+- [ ] Implement `git tasks show <id>` - show task details
+- [ ] Implement `git tasks done <id>` - mark task complete
+- [ ] Implement `git tasks ready` - list pending tasks (no blockers)
+- [ ] Add --after flag to `git tasks add` for dependencies
+- [ ] Implement `git tasks pr` - export markdown for PR description
+- [ ] Add --json flag to all commands
+- [ ] Block edit/delete when ZAGI_AGENT is set
+- [x] Add routing in main.zig for tasks command
+- [ ] Write integration tests in test/src/tasks.test.ts

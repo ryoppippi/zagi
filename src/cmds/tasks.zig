@@ -1,6 +1,7 @@
 const std = @import("std");
 const git = @import("git.zig");
 const c = git.c;
+const json = std.json;
 
 pub const help =
     \\usage: git tasks <command> [options]
@@ -41,6 +42,159 @@ pub const Error = git.Error || error{
     RefNotFound,
     BranchNameTooLong,
     AllocationError,
+    JsonParseError,
+    JsonWriteError,
+    OutOfMemory,
+};
+
+/// Represents a single task
+const Task = struct {
+    id: []const u8,
+    content: []const u8,
+    status: []const u8 = "pending",
+    created: i64,
+    completed: ?i64 = null,
+    after: ?[]const u8 = null, // ID of task this depends on
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.content);
+        allocator.free(self.status);
+        if (self.after) |after_id| {
+            allocator.free(after_id);
+        }
+    }
+};
+
+/// Container for all tasks in a branch
+const TaskList = struct {
+    tasks: std.ArrayList(Task),
+    next_id: u32 = 1,
+
+    const Self = @This();
+
+    pub fn init(_: std.mem.Allocator) Self {
+        return Self{
+            .tasks = std.ArrayList(Task){},
+        };
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (self.tasks.items) |*task| {
+            task.deinit(allocator);
+        }
+        self.tasks.deinit(allocator);
+    }
+
+    pub fn generateId(self: *Self, allocator: std.mem.Allocator) Error![]u8 {
+        const id = std.fmt.allocPrint(allocator, "task-{:03}", .{self.next_id}) catch return Error.OutOfMemory;
+        self.next_id += 1;
+        return id;
+    }
+
+    /// Serialize TaskList to simple text format
+    pub fn toJson(self: Self, allocator: std.mem.Allocator) Error![]u8 {
+        // Use a simple line-based format for now to avoid JSON complexity
+        var lines = std.ArrayList([]const u8){};
+        defer {
+            for (lines.items) |line| {
+                allocator.free(line);
+            }
+            lines.deinit(allocator);
+        }
+
+        // First line: next_id
+        const next_id_line = std.fmt.allocPrint(allocator, "next_id:{}", .{self.next_id}) catch return Error.OutOfMemory;
+        lines.append(allocator, next_id_line) catch return Error.OutOfMemory;
+
+        // Task lines: id|content|status|created|completed|after
+        for (self.tasks.items) |task| {
+            const completed_str = if (task.completed) |comp_time| std.fmt.allocPrint(allocator, "{}", .{comp_time}) catch return Error.OutOfMemory else allocator.dupe(u8, "") catch return Error.OutOfMemory;
+            const after_str = if (task.after) |a| a else "";
+
+            const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}|{s}",
+                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            ) catch return Error.OutOfMemory;
+            lines.append(allocator, task_line) catch return Error.OutOfMemory;
+
+            if (task.completed != null) {
+                allocator.free(completed_str);
+            }
+        }
+
+        // Join lines with newlines
+        var total_len: usize = 0;
+        for (lines.items) |line| {
+            total_len += line.len + 1; // +1 for newline
+        }
+
+        if (total_len == 0) return allocator.dupe(u8, "") catch return Error.OutOfMemory;
+
+        var result = allocator.alloc(u8, total_len - 1) catch return Error.OutOfMemory; // -1 to avoid trailing newline
+        var pos: usize = 0;
+        for (lines.items, 0..) |line, i| {
+            @memcpy(result[pos..pos + line.len], line);
+            pos += line.len;
+            if (i < lines.items.len - 1) {
+                result[pos] = '\n';
+                pos += 1;
+            }
+        }
+
+        return result;
+    }
+
+    /// Deserialize TaskList from simple text format
+    pub fn fromJson(allocator: std.mem.Allocator, data_str: []const u8) Error!Self {
+        var task_list = TaskList.init(allocator);
+
+        var lines = std.mem.splitSequence(u8, data_str, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "next_id:")) {
+                const id_str = line[8..];
+                task_list.next_id = std.fmt.parseInt(u32, id_str, 10) catch 1;
+            } else if (std.mem.startsWith(u8, line, "task:")) {
+                const task_data = line[5..];
+                var parts = std.mem.splitSequence(u8, task_data, "|");
+
+                var task = Task{
+                    .id = "",
+                    .content = "",
+                    .status = "pending",
+                    .created = 0,
+                };
+
+                if (parts.next()) |id| {
+                    task.id = allocator.dupe(u8, id) catch return Error.AllocationError;
+                }
+                if (parts.next()) |content| {
+                    task.content = allocator.dupe(u8, content) catch return Error.AllocationError;
+                }
+                if (parts.next()) |status| {
+                    task.status = allocator.dupe(u8, status) catch return Error.AllocationError;
+                }
+                if (parts.next()) |created| {
+                    task.created = std.fmt.parseInt(i64, created, 10) catch 0;
+                }
+                if (parts.next()) |completed| {
+                    if (completed.len > 0) {
+                        task.completed = std.fmt.parseInt(i64, completed, 10) catch null;
+                    }
+                }
+                if (parts.next()) |after| {
+                    if (after.len > 0) {
+                        task.after = allocator.dupe(u8, after) catch return Error.AllocationError;
+                    }
+                }
+
+                task_list.tasks.append(allocator, task) catch return Error.AllocationError;
+            }
+        }
+
+        return task_list;
+    }
 };
 
 /// Get current branch name
@@ -63,7 +217,7 @@ fn getCurrentBranch(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
     }
 
     const branch_name = full_name[prefix.len..];
-    return allocator.dupe(u8, branch_name);
+    return allocator.dupe(u8, branch_name) catch return Error.OutOfMemory;
 }
 
 /// Build a ref name like "refs/tasks/main" from a branch name
@@ -126,11 +280,41 @@ fn readRef(repo: ?*c.git_repository, allocator: std.mem.Allocator) Error!?[]u8 {
     const content_size = c.git_blob_rawsize(blob);
 
     if (content_ptr == null or content_size == 0) {
-        return allocator.dupe(u8, ""); // Empty content
+        const empty = allocator.dupe(u8, "") catch return Error.OutOfMemory; // Empty content
+        return empty;
     }
 
     const content_slice = @as([*]const u8, @ptrCast(content_ptr))[0..content_size];
-    return allocator.dupe(u8, content_slice);
+    const result = allocator.dupe(u8, content_slice) catch return Error.OutOfMemory;
+    return result;
+}
+
+/// Load TaskList from refs/tasks/<branch>
+fn loadTaskList(repo: ?*c.git_repository, allocator: std.mem.Allocator) Error!TaskList {
+    const content = readRef(repo, allocator) catch |err| switch (err) {
+        Error.RefNotFound => return TaskList.init(allocator),
+        else => return err,
+    };
+
+    if (content == null) {
+        return TaskList.init(allocator);
+    }
+
+    defer if (content) |json_content| allocator.free(json_content);
+
+    if (content.?.len == 0) {
+        return TaskList.init(allocator);
+    }
+
+    return TaskList.fromJson(allocator, content.?);
+}
+
+/// Save TaskList to refs/tasks/<branch>
+fn saveTaskList(repo: ?*c.git_repository, task_list: TaskList, allocator: std.mem.Allocator) Error!void {
+    const json_content = try task_list.toJson(allocator);
+    defer allocator.free(json_content);
+
+    try writeRef(repo, json_content, allocator);
 }
 
 /// Write task data to refs/tasks/<branch>
@@ -211,12 +395,81 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 }
 
 fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = allocator;
-    _ = args;
-    _ = repo;
-
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("tasks add: not implemented yet\n", .{}) catch {};
+
+    // Need at least: tasks add <content>
+    if (args.len < 4) {
+        stdout.print("error: missing task content\n\nusage: git tasks add <content>\n", .{}) catch {};
+        return Error.MissingTaskContent;
+    }
+
+    // Parse arguments for content and optional --after flag
+    var content: ?[]const u8 = null;
+    var after_id: ?[]const u8 = null;
+    var i: usize = 3; // Start after "git tasks add"
+
+    while (i < args.len) {
+        const arg = std.mem.sliceTo(args[i], 0);
+
+        if (std.mem.eql(u8, arg, "--after")) {
+            // Next argument should be the task ID
+            i += 1;
+            if (i >= args.len) {
+                stdout.print("error: --after requires a task ID\n", .{}) catch {};
+                return Error.InvalidTaskId;
+            }
+            after_id = std.mem.sliceTo(args[i], 0);
+        } else if (content == null) {
+            // First non-flag argument is the content
+            content = arg;
+        } else {
+            // Multiple content arguments - concatenate with spaces
+            const existing = content.?;
+            const combined = std.fmt.allocPrint(allocator, "{s} {s}", .{ existing, arg }) catch return Error.AllocationError;
+            // Note: we're not tracking these allocations, but they're short-lived
+            content = combined;
+        }
+        i += 1;
+    }
+
+    if (content == null or content.?.len == 0) {
+        stdout.print("error: task content cannot be empty\n", .{}) catch {};
+        return Error.MissingTaskContent;
+    }
+
+    // Load existing tasks
+    var task_list = loadTaskList(repo, allocator) catch |err| {
+        stdout.print("error: failed to load tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+    defer task_list.deinit(allocator);
+
+    // Generate new task ID
+    const task_id = task_list.generateId(allocator) catch return Error.AllocationError;
+
+    // Get current timestamp (Unix seconds)
+    const now = std.time.timestamp();
+
+    // Create the new task
+    const new_task = Task{
+        .id = task_id,
+        .content = allocator.dupe(u8, content.?) catch return Error.AllocationError,
+        .status = allocator.dupe(u8, "pending") catch return Error.AllocationError,
+        .created = now,
+        .after = if (after_id) |aid| allocator.dupe(u8, aid) catch return Error.AllocationError else null,
+    };
+
+    // Add task to list
+    task_list.tasks.append(allocator, new_task) catch return Error.AllocationError;
+
+    // Save updated task list
+    saveTaskList(repo, task_list, allocator) catch |err| {
+        stdout.print("error: failed to save tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+
+    // Output confirmation
+    stdout.print("created: {s}\n  {s}\n", .{ task_id, content.? }) catch {};
 }
 
 fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
