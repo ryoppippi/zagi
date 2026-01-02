@@ -8,8 +8,8 @@
 - [x] Implement `git tasks list` - list all tasks from ref
 - [x] Implement `git tasks show <id>` - show task details
 - [x] Implement `git tasks done <id>` - mark task complete
-- [ ] Implement `git tasks ready` - list pending tasks (no blockers)
-- [ ] Add --after flag to `git tasks add` for dependencies
+- [x] Implement `git tasks ready` - list pending tasks (no blockers)
+- [x] Add --after flag to `git tasks add` for dependencies
 - [ ] Implement `git tasks pr` - export markdown for PR description
 - [ ] Add --json flag to all commands
 - [ ] Block edit/delete when ZAGI_AGENT is set
