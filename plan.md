@@ -10,7 +10,7 @@
 - [x] Implement `git tasks done <id>` - mark task complete
 - [x] Implement `git tasks ready` - list pending tasks (no blockers)
 - [x] Add --after flag to `git tasks add` for dependencies
-- [ ] Implement `git tasks pr` - export markdown for PR description
+- [x] Implement `git tasks pr` - export markdown for PR description
 - [ ] Add --json flag to all commands
 - [ ] Block edit/delete when ZAGI_AGENT is set
 - [x] Add routing in main.zig for tasks command

@@ -68,6 +68,7 @@ const Task = struct {
     }
 };
 
+
 /// Container for all tasks in a branch
 const TaskList = struct {
     tasks: std.ArrayList(Task),
@@ -403,9 +404,10 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
         return Error.MissingTaskContent;
     }
 
-    // Parse arguments for content and optional --after flag
+    // Parse arguments for content, --after flag, and --json flag
     var content: ?[]const u8 = null;
     var after_id: ?[]const u8 = null;
+    var use_json = false;
     var i: usize = 3; // Start after "git tasks add"
 
     while (i < args.len) {
@@ -419,6 +421,8 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
                 return Error.InvalidTaskId;
             }
             after_id = std.mem.sliceTo(args[i], 0);
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            use_json = true;
         } else if (content == null) {
             // First non-flag argument is the content
             content = arg;
@@ -469,12 +473,35 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
     };
 
     // Output confirmation
-    stdout.print("created: {s}\n  {s}\n", .{ task_id, content.? }) catch {};
+    if (use_json) {
+        // Manually construct JSON output
+        const after_str = if (after_id) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+        defer allocator.free(after_str);
+
+        const json_output = try std.fmt.allocPrint(allocator,
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"pending\",\"created\":{},\"completed\":null,\"after\":{s}}}",
+            .{ task_id, content.?, now, after_str }
+        );
+        defer allocator.free(json_output);
+
+        stdout.print("{s}\n", .{json_output}) catch {};
+    } else {
+        stdout.print("created: {s}\n  {s}\n", .{ task_id, content.? }) catch {};
+    }
 }
 
 fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = args; // No additional args needed for list
     const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Parse --json flag
+    var use_json = false;
+    for (args[3..]) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
+            break;
+        }
+    }
 
     // Load task list from git ref
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -482,6 +509,63 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
         return err;
     };
     defer task_list.deinit(allocator);
+
+    if (use_json) {
+        // JSON output using std.json
+        const JsonTask = struct {
+            id: []const u8,
+            content: []const u8,
+            status: []const u8,
+            created: i64,
+            completed: ?i64,
+            after: ?[]const u8,
+        };
+
+
+        // Convert tasks to JSON-compatible format
+        var json_tasks = std.ArrayList(JsonTask){};
+        defer json_tasks.deinit(allocator);
+
+        for (task_list.tasks.items) |task| {
+            json_tasks.append(allocator, JsonTask{
+                .id = task.id,
+                .content = task.content,
+                .status = task.status,
+                .created = task.created,
+                .completed = task.completed,
+                .after = task.after,
+            }) catch return Error.AllocationError;
+        }
+
+        // Manually construct JSON array
+        var json_output = std.ArrayList(u8){};
+        defer json_output.deinit(allocator);
+
+        try json_output.appendSlice(allocator, "{\"tasks\":[");
+
+        for (json_tasks.items, 0..) |task, i| {
+            if (i > 0) try json_output.appendSlice(allocator, ",");
+
+            const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+            defer allocator.free(completed_str);
+
+            const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+            defer allocator.free(after_str);
+
+            const task_json = try std.fmt.allocPrint(allocator,
+                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
+                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            );
+            defer allocator.free(task_json);
+
+            try json_output.appendSlice(allocator, task_json);
+        }
+
+        try json_output.appendSlice(allocator, "]}");
+
+        stdout.print("{s}\n", .{json_output.items}) catch {};
+        return;
+    }
 
     // If no tasks, show empty state
     if (task_list.tasks.items.len == 0) {
@@ -543,11 +627,27 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     // Need at least: tasks show <id>
     if (args.len < 4) {
-        stdout.print("error: missing task ID\n\nusage: git tasks show <id>\n", .{}) catch {};
+        stdout.print("error: missing task ID\n\nusage: git tasks show <id> [--json]\n", .{}) catch {};
         return Error.InvalidTaskId;
     }
 
-    const task_id = std.mem.sliceTo(args[3], 0);
+    // Parse arguments for task ID and --json flag
+    var task_id: ?[]const u8 = null;
+    var use_json = false;
+
+    for (args[3..]) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
+        } else if (task_id == null) {
+            task_id = a;
+        }
+    }
+
+    if (task_id == null) {
+        stdout.print("error: missing task ID\n\nusage: git tasks show <id> [--json]\n", .{}) catch {};
+        return Error.InvalidTaskId;
+    }
 
     // Load task list
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -559,18 +659,36 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     // Find the task by ID
     var found_task: ?Task = null;
     for (task_list.tasks.items) |task| {
-        if (std.mem.eql(u8, task.id, task_id)) {
+        if (std.mem.eql(u8, task.id, task_id.?)) {
             found_task = task;
             break;
         }
     }
 
     if (found_task == null) {
-        stdout.print("error: task '{s}' not found\n", .{task_id}) catch {};
+        stdout.print("error: task '{s}' not found\n", .{task_id.?}) catch {};
         return Error.TaskNotFound;
     }
 
     const task = found_task.?;
+
+    if (use_json) {
+        // JSON output
+        const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+        defer allocator.free(completed_str);
+
+        const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+        defer allocator.free(after_str);
+
+        const json_output = try std.fmt.allocPrint(allocator,
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
+            .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+        );
+        defer allocator.free(json_output);
+
+        stdout.print("{s}\n", .{json_output}) catch {};
+        return;
+    }
 
     // Format created timestamp
     const created_time = formatTimestamp(task.created, allocator) catch return Error.AllocationError;
