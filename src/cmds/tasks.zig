@@ -599,12 +599,58 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runDone(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = allocator;
-    _ = args;
-    _ = repo;
-
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("tasks done: not implemented yet\n", .{}) catch {};
+
+    // Need at least: tasks done <id>
+    if (args.len < 4) {
+        stdout.print("error: missing task ID\n\nusage: git tasks done <id>\n", .{}) catch {};
+        return Error.InvalidTaskId;
+    }
+
+    const task_id = std.mem.sliceTo(args[3], 0);
+
+    // Load task list
+    var task_list = loadTaskList(repo, allocator) catch |err| {
+        stdout.print("error: failed to load tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+    defer task_list.deinit(allocator);
+
+    // Find the task by ID and mark as completed
+    var found_task: ?*Task = null;
+    for (task_list.tasks.items) |*task| {
+        if (std.mem.eql(u8, task.id, task_id)) {
+            found_task = task;
+            break;
+        }
+    }
+
+    if (found_task == null) {
+        stdout.print("error: task '{s}' not found\n", .{task_id}) catch {};
+        return Error.TaskNotFound;
+    }
+
+    const task = found_task.?;
+
+    // Check if task is already completed
+    if (std.mem.eql(u8, task.status, "completed")) {
+        stdout.print("task '{s}' already completed\n", .{task_id}) catch {};
+        return;
+    }
+
+    // Mark task as completed
+    allocator.free(task.status); // Free old status string
+    task.status = allocator.dupe(u8, "completed") catch return Error.AllocationError;
+    task.completed = std.time.timestamp(); // Set completion timestamp
+
+    // Save updated task list
+    saveTaskList(repo, task_list, allocator) catch |err| {
+        stdout.print("error: failed to save tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+
+    // Output confirmation
+    stdout.print("completed: {s}\n  {s}\n", .{ task_id, task.content }) catch {};
 }
 
 fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
