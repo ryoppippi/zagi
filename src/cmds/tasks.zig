@@ -462,19 +462,36 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
     // Get current timestamp (Unix seconds)
     const now = std.time.timestamp();
 
-    // Create the new task
+    // Create the new task - allocate fields with proper cleanup on failure
+    const task_content = allocator.dupe(u8, content.?) catch {
+        allocator.free(task_id);
+        return Error.AllocationError;
+    };
+
+    const task_status = allocator.dupe(u8, "pending") catch {
+        allocator.free(task_id);
+        allocator.free(task_content);
+        return Error.AllocationError;
+    };
+
     const new_task = Task{
         .id = task_id,
-        .content = allocator.dupe(u8, content.?) catch return Error.AllocationError,
-        .status = allocator.dupe(u8, "pending") catch return Error.AllocationError,
+        .content = task_content,
+        .status = task_status,
         .created = now,
         .after = if (after_id) |aid| allocator.dupe(u8, aid) catch return Error.AllocationError else null,
     };
 
-    // Add task to list
-    task_list.tasks.append(allocator, new_task) catch return Error.AllocationError;
+    // Add task to list - after this, task_list owns the allocations
+    task_list.tasks.append(allocator, new_task) catch {
+        allocator.free(task_id);
+        allocator.free(task_content);
+        allocator.free(task_status);
+        return Error.AllocationError;
+    };
 
     // Save updated task list
+    // Note: After append succeeds, task_list.deinit handles cleanup on any error path
     saveTaskList(repo, task_list, allocator) catch |err| {
         stdout.print("error: failed to save tasks: {}\n", .{err}) catch {};
         return err;
