@@ -22,7 +22,7 @@ jobs:
           - os: macos-latest
             target: native
             artifact: zagi-macos-aarch64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-linux-gnu
             artifact: zagi-linux-aarch64
 
