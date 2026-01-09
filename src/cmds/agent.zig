@@ -157,6 +157,41 @@ fn updateFailureCount(allocator: std.mem.Allocator, map: *std.StringHashMap(u32)
     gop.value_ptr.* = new_count;
 }
 
+/// Creates a log file in /tmp/zagi/<cwd-basename>/<random>.log
+/// Returns the path to the log file if successful.
+fn createLogFile(allocator: std.mem.Allocator, path_buf: *[512]u8, out_file: *?std.fs.File) ?[]const u8 {
+    _ = allocator;
+
+    // Get current working directory name for the log subdirectory
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return null;
+    const repo_name = std.fs.path.basename(cwd);
+
+    // Generate a random ID for this run
+    var random_bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&random_bytes);
+
+    // Format as hex string
+    var hex_buf: [16]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (random_bytes, 0..) |byte, i| {
+        hex_buf[i * 2] = hex_chars[byte >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[byte & 0xf];
+    }
+
+    // Build path: /tmp/zagi/<repo_name>/<hex>.log
+    const path = std.fmt.bufPrint(path_buf, "/tmp/zagi/{s}/{s}.log", .{ repo_name, hex_buf }) catch return null;
+
+    // Create directory structure
+    const dir_path = std.fmt.bufPrint(path_buf[256..], "/tmp/zagi/{s}", .{repo_name}) catch return null;
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    // Create the log file
+    out_file.* = std.fs.cwd().createFile(path, .{}) catch return null;
+
+    return path;
+}
+
 /// Validates ZAGI_AGENT env var. Returns validated executor or error.
 /// If not set, returns "claude" as default.
 /// If set to invalid value (like "1"), returns error.
@@ -519,10 +554,15 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
     defer c.git_repository_free(repo);
 
-    // Open log file for append
-    var log_file: ?std.fs.File = std.fs.cwd().createFile("agent.log", .{ .truncate = false }) catch null;
-    if (log_file) |*f| f.seekFromEnd(0) catch {};
+    // Create log file in temp directory: /tmp/zagi/<reponame>/<random>.log
+    var log_file: ?std.fs.File = null;
+    var log_path_buf: [512]u8 = undefined;
+    const log_path = createLogFile(allocator, &log_path_buf, &log_file);
     defer if (log_file) |f| f.close();
+
+    if (log_path) |p| {
+        stdout.print("Log file: {s}\n", .{p}) catch {};
+    }
 
     var tasks_completed: u32 = 0;
 
@@ -606,7 +646,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
-            const success = executeTask(allocator, executor, agent_cmd, exe_path, task.id, task.content) catch false;
+            const success = executeTask(allocator, executor, agent_cmd, exe_path, task.id, task.content, log_file) catch false;
 
             if (success) {
                 updateFailureCount(allocator, &consecutive_failures, task.id, 0);
@@ -696,57 +736,73 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     return PendingTasks{ .tasks = pending.toOwnedSlice(allocator) catch &.{} };
 }
 
-fn createPrompt(allocator: std.mem.Allocator, executor: []const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) ![]u8 {
-    // Determine which documentation file this executor should update
-    const is_claude = std.mem.eql(u8, executor, "claude");
-    const docs_file = if (is_claude) "CLAUDE.md" else "AGENTS.md";
-
+fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []const u8, task_content: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
-        \\You are working on: {0s}
-        \\
+        \\Task ID: {0s}
         \\Task: {1s}
         \\
         \\Instructions:
-        \\1. Read AGENTS.md for project context and build instructions
+        \\1. Read AGENTS.md if it exists for project context
         \\2. Complete this ONE task only
-        \\3. Verify your work (run tests, check build)
-        \\4. Commit your changes with: git commit -m "<message>"
-        \\5. Mark the task done: {2s} tasks done {0s}
-        \\
-        \\Knowledge Persistence:
-        \\If you discover important structural insights during this task, update {3s}:
-        \\- Build commands that work (or gotchas that don't)
-        \\- Key file locations and their purposes
-        \\- Project conventions not documented elsewhere
-        \\- Common errors and their solutions
-        \\Only add genuinely useful operational knowledge, not task-specific details.
+        \\3. Verify your work (run tests if applicable)
+        \\4. Commit changes: git commit -m "<message>"
+        \\5. Mark done: {2s} tasks done {0s}
+        \\6. Output: TASK_DONE
         \\
         \\Rules:
-        \\- NEVER git push (only commit)
-        \\- ONLY work on this one task
-        \\- Exit when done so the next task can start
-    , .{ task_id, task_content, exe_path, docs_file });
+        \\- NEVER git push
+        \\- Only work on this task
+        \\- Output TASK_DONE when complete
+    , .{ task_id, task_content, exe_path });
 }
 
-fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) !bool {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8, log_file: ?std.fs.File) !bool {
+    const stderr_writer = std.fs.File.stderr().deprecatedWriter();
 
-    const prompt = try createPrompt(allocator, executor, exe_path, task_id, task_content);
+    const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
     // Use headless mode (interactive=false) for autonomous task execution
     var runner_args = try buildExecutorArgs(allocator, executor, agent_cmd, prompt, false);
     defer runner_args.deinit(allocator);
 
-    var child = std.process.Child.init(runner_args.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-
-    const term = child.spawnAndWait() catch |err| {
-        stderr.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
+    // Run the command and capture output
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = runner_args.items,
+    }) catch |err| {
+        stderr_writer.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
         return false;
     };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    return term == .Exited and term.Exited == 0;
+    // Echo output to console
+    if (result.stdout.len > 0) {
+        std.fs.File.stdout().writeAll(result.stdout) catch {};
+    }
+    if (result.stderr.len > 0) {
+        std.fs.File.stderr().writeAll(result.stderr) catch {};
+    }
+
+    // Write to log file
+    if (log_file) |f| {
+        f.writeAll(result.stdout) catch {};
+        if (result.stderr.len > 0) {
+            f.writeAll("\n--- stderr ---\n") catch {};
+            f.writeAll(result.stderr) catch {};
+        }
+    }
+
+    // The completion marker that signals task completion
+    const completion_marker = "TASK_DONE";
+    const found_completion = std.mem.indexOf(u8, result.stdout, completion_marker) != null;
+
+    const exited_ok = result.term == .Exited and result.term.Exited == 0;
+
+    if (!found_completion) {
+        stderr_writer.print("Task did not output completion promise\n", .{}) catch {};
+    }
+
+    return exited_ok and found_completion;
 }
