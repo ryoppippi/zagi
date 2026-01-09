@@ -227,26 +227,58 @@ describe("zagi tasks done", () => {
 });
 
 describe("zagi tasks edit", () => {
-  test("appends in agent mode (append-only)", () => {
+  test("is blocked in agent mode", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
-    const result = zagi(["tasks", "edit", "task-001", "Additional notes"], {
+    const result = zagi(["tasks", "edit", "task-001", "New content"], {
       cwd: REPO_DIR,
       env: { ZAGI_AGENT: "claude" }
     });
 
-    // In agent mode, edit appends to task instead of replacing
-    expect(result).toContain("appended: task-001");
-    expect(result).toContain("Additional notes");
+    // Edit is blocked in agent mode - agents should use append
+    expect(result).toContain("error: edit command blocked");
+    expect(result).toContain("tasks append");
   });
 
   test("replaces when not in agent mode", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
-    const result = zagi(["tasks", "edit", "task-001", "Updated content"], { cwd: REPO_DIR });
+    // Explicitly unset ZAGI_AGENT to test non-agent mode
+    const result = zagi(["tasks", "edit", "task-001", "Updated content"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "" }
+    });
 
     expect(result).toContain("updated: task-001");
     expect(result).toContain("Updated content");
+  });
+});
+
+describe("zagi tasks append", () => {
+  test("appends to task content", () => {
+    zagi(["tasks", "add", "Original task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "append", "task-001", "Additional notes"], { cwd: REPO_DIR });
+
+    expect(result).toContain("appended: task-001");
+    expect(result).toContain("Additional notes");
+
+    // Verify content was appended
+    const showResult = zagi(["tasks", "show", "task-001"], { cwd: REPO_DIR });
+    expect(showResult).toContain("Original task");
+    expect(showResult).toContain("Additional notes");
+  });
+
+  test("works in agent mode", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "append", "task-001", "Agent notes"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("appended: task-001");
+    expect(result).toContain("Agent notes");
   });
 });
 
@@ -267,7 +299,11 @@ describe("zagi tasks delete", () => {
   test("succeeds when not in agent mode", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
-    const result = zagi(["tasks", "delete", "task-001"], { cwd: REPO_DIR });
+    // Explicitly unset ZAGI_AGENT to test non-agent mode
+    const result = zagi(["tasks", "delete", "task-001"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "" }
+    });
 
     expect(result).toContain("deleted: task-001");
     expect(result).toContain("Test task");

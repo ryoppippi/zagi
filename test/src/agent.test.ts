@@ -24,7 +24,18 @@ afterEach(() => {
  */
 function createSuccessExecutor(repoDir: string): string {
   const scriptPath = resolve(repoDir, "mock-success.sh");
-  writeFileSync(scriptPath, "#!/bin/bash\nexit 0\n");
+  const script = `#!/bin/bash
+# Output completion promise (required for agent run to succeed)
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
+exit 0
+`;
+  writeFileSync(scriptPath, script);
   chmodSync(scriptPath, 0o755);
   return scriptPath;
 }
@@ -60,6 +71,14 @@ echo "$COUNT" > "$COUNTER_FILE"
 if [ "$COUNT" -le ${failCount} ]; then
   exit 1
 fi
+# Output completion promise (required for agent run to succeed)
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
 exit 0
 `;
   writeFileSync(scriptPath, script);
@@ -74,11 +93,23 @@ exit 0
 function createTaskCompletingExecutor(repoDir: string, zagiPath: string): string {
   const scriptPath = resolve(repoDir, "mock-complete.sh");
   // The prompt contains the task ID - extract and mark done
-  // Format: "You are working on: task-XXX\n..."
+  // Format: "Task ID: task-XXX\n..."
   const script = `#!/bin/bash
 PROMPT="$1"
-TASK_ID=$(echo "$PROMPT" | head -1 | sed 's/You are working on: //')
-${zagiPath} tasks done "$TASK_ID" > /dev/null 2>&1
+TASK_ID=$(echo "$PROMPT" | head -1 | sed 's/Task ID: //')
+
+# Mark task as done (let errors show for debugging)
+${zagiPath} tasks done "$TASK_ID"
+
+# Output completion promise (required for agent run to succeed)
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
+
 exit 0
 `;
   writeFileSync(scriptPath, script);
@@ -100,6 +131,16 @@ for arg in "$@"; do
   echo "$arg" >> "${logFile}"
 done
 echo "---END---" >> "${logFile}"
+
+# Output completion promise to stdout (required for agent run to succeed)
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
+
 exit 0
 `;
   writeFileSync(scriptPath, script);
@@ -122,6 +163,16 @@ echo "ARG_COUNT: $#" >> "${logFile}"
 for arg in "$@"; do
   echo "ARG: $arg" >> "${logFile}"
 done
+
+# Output completion promise to stdout (required for agent run to succeed)
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
+
 exit 0
 `;
   writeFileSync(scriptPath, script);
@@ -182,7 +233,7 @@ describe("zagi agent subcommand routing", () => {
 });
 
 // ============================================================================
-// Plan Args: --help, --model, description handling
+// Plan Args: --help, --dry-run, description handling
 // ============================================================================
 
 describe("zagi agent plan args", () => {
@@ -190,7 +241,6 @@ describe("zagi agent plan args", () => {
     const result = zagi(["agent", "plan", "-h"], { cwd: REPO_DIR });
 
     expect(result).toContain("usage: git agent plan");
-    expect(result).toContain("--model");
     expect(result).toContain("--dry-run");
     expect(result).toContain("-h, --help");
   });
@@ -200,25 +250,6 @@ describe("zagi agent plan args", () => {
 
     expect(result).toContain("usage: git agent plan");
     expect(result).toContain("description");
-  });
-
-  test("--model flag requires a value", () => {
-    const result = zagi(["agent", "plan", "--model"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT_CMD: "echo" }
-    });
-
-    expect(result).toContain("error: --model requires a model name");
-  });
-
-  test("--model flag passes model to executor in dry-run", () => {
-    const result = zagi(["agent", "plan", "--model", "claude-sonnet-4", "--dry-run"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT_CMD: "my-agent" }
-    });
-
-    expect(result).toContain("Interactive Planning Session (dry-run)");
-    expect(result).toContain("Would execute:");
   });
 
   test("description is optional (interactive mode)", () => {
@@ -252,7 +283,7 @@ describe("zagi agent plan args", () => {
 });
 
 // ============================================================================
-// Run Args: --help, --delay, --max-tasks, --model
+// Run Args: --help, --delay, --max-tasks
 // ============================================================================
 
 describe("zagi agent run args", () => {
@@ -260,7 +291,6 @@ describe("zagi agent run args", () => {
     const result = zagi(["agent", "run", "-h"], { cwd: REPO_DIR });
 
     expect(result).toContain("usage: git agent run");
-    expect(result).toContain("--model");
     expect(result).toContain("--once");
     expect(result).toContain("--dry-run");
     expect(result).toContain("--delay");
@@ -272,15 +302,6 @@ describe("zagi agent run args", () => {
 
     expect(result).toContain("usage: git agent run");
     expect(result).toContain("Options:");
-  });
-
-  test("--model flag requires a value", () => {
-    const result = zagi(["agent", "run", "--model"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT_CMD: "echo" }
-    });
-
-    expect(result).toContain("error: --model requires a model name");
   });
 
   test("--delay flag requires a value", () => {
@@ -492,21 +513,6 @@ describe("zagi agent executor paths", () => {
     // Should NOT contain "opencode run" since that's for headless mode
     expect(result).not.toMatch(/opencode run/);
   });
-
-  test("--model flag is passed to executor for run command", () => {
-    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    zagi(["agent", "run", "--model", "test-model", "--once"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude", ZAGI_AGENT_CMD: script }
-    });
-
-    // When using ZAGI_AGENT_CMD, model flag is not passed to the custom command
-    // (custom commands handle their own model selection)
-    const logContent = readFileSync(logFile, "utf-8");
-    expect(logContent).toContain("You are working on:"); // Prompt was passed
-  });
 });
 
 // ============================================================================
@@ -678,10 +684,6 @@ describe("zagi agent run max failures exit condition", () => {
   });
 
   test("continues with other tasks when one exceeds failure threshold", () => {
-    // First task always fails, second task succeeds
-    const failScript = createFailureExecutor(REPO_DIR);
-    const successScript = createSuccessExecutor(REPO_DIR);
-
     // Create a script that fails for task-001 but succeeds for task-002
     const smartScript = resolve(REPO_DIR, "mock-smart.sh");
     writeFileSync(smartScript, `#!/bin/bash
@@ -689,6 +691,14 @@ PROMPT="$1"
 if echo "$PROMPT" | grep -q "task-001"; then
   exit 1
 fi
+# Output completion promise for task-002
+echo ""
+echo "COMPLETION PROMISE: I confirm that:"
+echo "- Tests pass: N/A"
+echo "- Build succeeds: N/A"
+echo "- Changes committed: N/A"
+echo "- Task completed: Mock task"
+echo "-- I have not taken any shortcuts or skipped verification."
 exit 0
 `);
     chmodSync(smartScript, 0o755);
@@ -886,7 +896,7 @@ describe("zagi agent run ZAGI_AGENT_CMD override", () => {
     expect(logContent).toContain("---END---"); // Script was executed
 
     // The prompt should be passed as the argument
-    expect(logContent).toContain("You are working on: task-001");
+    expect(logContent).toContain("Task ID: task-001");
   });
 
   test("handles command with spaces and multiple arguments", () => {
@@ -912,7 +922,7 @@ describe("zagi agent run ZAGI_AGENT_CMD override", () => {
     expect(logContent).toContain("ARG: --model");
     expect(logContent).toContain("ARG: gpt-4");
     // The prompt is the last argument
-    expect(logContent).toMatch(/ARG:.*You are working on: task-001/);
+    expect(logContent).toMatch(/ARG:.*Task ID: task-001/);
   });
 
   test("prompt is appended as final argument", () => {
@@ -936,7 +946,7 @@ describe("zagi agent run ZAGI_AGENT_CMD override", () => {
     expect(lines.length).toBe(3);
     expect(lines[0]).toBe("ARG: --first");
     expect(lines[1]).toBe("ARG: --second");
-    expect(lines[2]).toContain("You are working on: task-001"); // Prompt is last
+    expect(lines[2]).toContain("Task ID: task-001"); // Prompt is last
   });
 
   test("dry-run shows ZAGI_AGENT_CMD in output", () => {
@@ -972,7 +982,7 @@ describe("zagi agent run ZAGI_AGENT_CMD override", () => {
     const { readFileSync } = require("fs");
     const logContent = readFileSync(logFile, "utf-8");
     expect(logContent).toContain("---END---"); // Our script ran
-    expect(logContent).toContain("You are working on:"); // Got the prompt
+    expect(logContent).toContain("Task ID:"); // Got the prompt
   });
 });
 

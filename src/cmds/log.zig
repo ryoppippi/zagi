@@ -196,16 +196,45 @@ fn printCommit(
         try writer.print("{s} {s}\n", .{ sha[0..7], subject });
     }
 
-    // Show prompt note if requested
+    // Show agent metadata if requested
     if (opts.show_prompts) {
         const repo = c.git_commit_owner(commit);
         var note: ?*c.git_note = null;
-        if (c.git_note_read(&note, repo, "refs/notes/prompts", oid) == 0) {
+
+        // Read agent name from refs/notes/agent (plain text)
+        if (c.git_note_read(&note, repo, "refs/notes/agent", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const agent_name = std.mem.sliceTo(msg, 0);
+                try writer.print("  agent: {s}\n", .{agent_name});
+            }
+        }
+
+        // Read prompt from refs/notes/prompt (plain text)
+        note = null;
+        if (c.git_note_read(&note, repo, "refs/notes/prompt", oid) == 0) {
             defer c.git_note_free(note);
             const note_msg = c.git_note_message(note);
             if (note_msg) |msg| {
                 const prompt_text = std.mem.sliceTo(msg, 0);
-                // Truncate long prompts for display
+                const max_len: usize = 200;
+                if (prompt_text.len > max_len) {
+                    try writer.print("  prompt: {s}...\n", .{prompt_text[0..max_len]});
+                } else {
+                    try writer.print("  prompt: {s}\n", .{prompt_text});
+                }
+            }
+        }
+        // Fallback to legacy refs/notes/prompts (will be removed in future)
+        // Convert legacy notes: git notes --ref=prompts list | while read blob commit; do
+        //   git notes --ref=prompt add -m "$(git notes --ref=prompts show $commit)" $commit
+        // done
+        else if (c.git_note_read(&note, repo, "refs/notes/prompts", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const prompt_text = std.mem.sliceTo(msg, 0);
                 const max_len: usize = 200;
                 if (prompt_text.len > max_len) {
                     try writer.print("  prompt: {s}...\n", .{prompt_text[0..max_len]});

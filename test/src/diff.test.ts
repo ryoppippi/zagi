@@ -333,3 +333,34 @@ describe("zagi diff --name-only", () => {
     expect(result).toContain("src/main.ts");
   });
 });
+
+describe("zagi diff file path handling", () => {
+  test("file path without -- is treated as path, not revision", () => {
+    // This was a bug: `git diff path/to/file` would fail with
+    // "failed to walk commits" because the path was treated as a revision
+    const result = zagi(["diff", "src/main.ts"], { cwd: REPO_DIR });
+
+    // Should show diff for that file, not error
+    expect(result).toContain("src/main.ts");
+    expect(result).not.toContain("failed to walk");
+  });
+
+  test("non-existent path is treated as revision spec", () => {
+    // If path doesn't exist, treat as revision (will fail appropriately)
+    const result = zagi(["diff", "nonexistent-branch"], { cwd: REPO_DIR });
+
+    // Should fail because it's not a valid revision
+    expect(result).toContain("failed to walk commits");
+  });
+
+  test("multiple file paths work without --", () => {
+    // Create another file with changes
+    writeFileSync(resolve(REPO_DIR, "README.md"), "# Updated\n");
+
+    const result = zagi(["diff", "src/main.ts", "README.md"], { cwd: REPO_DIR });
+
+    // Should show diff for both files
+    expect(result).toContain("src/main.ts");
+    expect(result).toContain("README.md");
+  });
+});

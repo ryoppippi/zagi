@@ -375,7 +375,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     // Check ZAGI_AGENT_CMD for custom command override
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
     const executor = if (agent_cmd != null)
-        std.posix.getenv("ZAGI_AGENT") orelse "claude" // Custom cmd bypasses validation
+        std.posix.getenv("ZAGI_AGENT") orelse "" // No auto flags when only ZAGI_AGENT_CMD is set
     else
         try getValidatedExecutor(stdout);
 
@@ -518,7 +518,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     // Check ZAGI_AGENT_CMD for custom command override
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
     const executor = if (agent_cmd != null)
-        std.posix.getenv("ZAGI_AGENT") orelse "claude" // Custom cmd bypasses validation
+        std.posix.getenv("ZAGI_AGENT") orelse "" // No auto flags when only ZAGI_AGENT_CMD is set
     else
         try getValidatedExecutor(stdout);
 
