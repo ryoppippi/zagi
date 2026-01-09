@@ -747,12 +747,29 @@ fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []c
         \\3. Verify your work (run tests if applicable)
         \\4. Commit changes: git commit -m "<message>"
         \\5. Mark done: {2s} tasks done {0s}
-        \\6. Output: TASK_DONE
+        \\6. Output the COMPLETION PROMISE below
+        \\
+        \\Knowledge Persistence:
+        \\If you discover important insights during this task, update AGENTS.md:
+        \\- Build commands that work (or gotchas that don't)
+        \\- Key file locations and their purposes
+        \\- Project conventions not documented elsewhere
+        \\- Common errors and their solutions
+        \\Only add genuinely useful operational knowledge, not task-specific details.
+        \\
+        \\COMPLETION PROMISE (required - output this exactly when done):
+        \\
+        \\COMPLETION PROMISE: I confirm that:
+        \\- Tests pass: [which tests ran, or "N/A" if no tests]
+        \\- Build succeeds: [build command, or "N/A" if no build]
+        \\- Changes committed: [commit hash and message]
+        \\- Task completed: [brief summary of what was done]
+        \\-- I have not taken any shortcuts or skipped verification.
         \\
         \\Rules:
         \\- NEVER git push
         \\- Only work on this task
-        \\- Output TASK_DONE when complete
+        \\- Must output the completion promise when done
     , .{ task_id, task_content, exe_path });
 }
 
@@ -794,9 +811,12 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[
         }
     }
 
-    // The completion marker that signals task completion
-    const completion_marker = "TASK_DONE";
-    const found_completion = std.mem.indexOf(u8, result.stdout, completion_marker) != null;
+    // Check for completion promise - must have both first and last lines
+    const promise_start = "COMPLETION PROMISE: I confirm that:";
+    const promise_end = "-- I have not taken any shortcuts or skipped verification.";
+    const found_start = std.mem.indexOf(u8, result.stdout, promise_start) != null;
+    const found_end = std.mem.indexOf(u8, result.stdout, promise_end) != null;
+    const found_completion = found_start and found_end;
 
     const exited_ok = result.term == .Exited and result.term.Exited == 0;
 
