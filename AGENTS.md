@@ -108,27 +108,21 @@ The run loop will:
 
 Control which AI agent executes tasks using environment variables:
 
-**ZAGI_AGENT** - Select a built-in executor:
 ```bash
 # Use Claude Code (default)
 ZAGI_AGENT=claude zagi agent run
 
 # Use opencode
 ZAGI_AGENT=opencode zagi agent run
-```
 
-Valid values: `claude`, `opencode`
+# Use custom command with auto mode flags
+ZAGI_AGENT=claude ZAGI_AGENT_CMD="myclaude --flag" zagi agent run
 
-**ZAGI_AGENT_CMD** - Use a custom command:
-```bash
-# Use aider
+# Use completely custom tool (no auto flags)
 ZAGI_AGENT_CMD="aider --yes" zagi agent run
-
-# Use any CLI tool that accepts a prompt as the last argument
-ZAGI_AGENT_CMD="my-custom-agent" zagi agent plan "Build feature X"
 ```
 
-When `ZAGI_AGENT_CMD` is set, it overrides the executor selection. The prompt is appended as the final argument to your command.
+See [docs/setup.md](docs/setup.md) for full configuration details.
 
 ### Blocked Commands (in agent mode)
 

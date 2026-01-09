@@ -72,15 +72,6 @@ pub const Error = git.Error || error{
 /// Valid executor values for ZAGI_AGENT
 const valid_executors = [_][]const u8{ "claude", "opencode" };
 
-/// Logs a formatted message to a file (if available).
-fn logToFile(allocator: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
-    if (file) |f| {
-        const msg = std.fmt.allocPrint(allocator, fmt, log_args) catch return;
-        defer allocator.free(msg);
-        f.writeAll(msg) catch {};
-    }
-}
-
 /// Builds command arguments for the specified executor.
 /// Returns an ArrayList that the caller must deinit.
 ///
@@ -100,9 +91,19 @@ fn buildExecutorArgs(
     errdefer args.deinit(allocator);
 
     if (agent_cmd) |cmd| {
+        // Custom command as base, but use executor to determine mode flags
         var parts = std.mem.splitScalar(u8, cmd, ' ');
         while (parts.next()) |part| {
             if (part.len > 0) try args.append(allocator, part);
+        }
+        // Add mode flags based on executor type (if known)
+        if (!interactive) {
+            if (std.mem.eql(u8, executor, "claude")) {
+                try args.append(allocator, "-p");
+            } else if (std.mem.eql(u8, executor, "opencode")) {
+                try args.append(allocator, "run");
+            }
+            // Unknown executor: no auto flags added
         }
         try args.append(allocator, prompt);
     } else if (std.mem.eql(u8, executor, "claude")) {
@@ -131,6 +132,7 @@ fn buildExecutorArgs(
 /// Formats the executor command for dry-run display.
 /// The `interactive` parameter mirrors the buildExecutorArgs behavior.
 fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8, interactive: bool) []const u8 {
+    // Custom command - shown as-is, user is responsible for including flags
     if (agent_cmd) |cmd| return cmd;
     if (std.mem.eql(u8, executor, "claude")) {
         return if (interactive) "claude" else "claude -p";
@@ -157,11 +159,9 @@ fn updateFailureCount(allocator: std.mem.Allocator, map: *std.StringHashMap(u32)
     gop.value_ptr.* = new_count;
 }
 
-/// Creates a log file in /tmp/zagi/<cwd-basename>/<random>.log
-/// Returns the path to the log file if successful.
-fn createLogFile(allocator: std.mem.Allocator, path_buf: *[512]u8, out_file: *?std.fs.File) ?[]const u8 {
-    _ = allocator;
-
+/// Creates a log path in /tmp/zagi/<cwd-basename>/<random>.log
+/// Creates the directory structure but not the file (tee will create it).
+fn createLogPath(path_buf: *[512]u8) ?[]const u8 {
     // Get current working directory name for the log subdirectory
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return null;
@@ -179,15 +179,13 @@ fn createLogFile(allocator: std.mem.Allocator, path_buf: *[512]u8, out_file: *?s
         hex_buf[i * 2 + 1] = hex_chars[byte & 0xf];
     }
 
-    // Build path: /tmp/zagi/<repo_name>/<hex>.log
-    const path = std.fmt.bufPrint(path_buf, "/tmp/zagi/{s}/{s}.log", .{ repo_name, hex_buf }) catch return null;
-
-    // Create directory structure
-    const dir_path = std.fmt.bufPrint(path_buf[256..], "/tmp/zagi/{s}", .{repo_name}) catch return null;
+    // Build directory path and create it
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&dir_buf, "/tmp/zagi/{s}", .{repo_name}) catch return null;
     std.fs.cwd().makePath(dir_path) catch {};
 
-    // Create the log file
-    out_file.* = std.fs.cwd().createFile(path, .{}) catch return null;
+    // Build full file path
+    const path = std.fmt.bufPrint(path_buf, "/tmp/zagi/{s}/{s}.log", .{ repo_name, hex_buf }) catch return null;
 
     return path;
 }
@@ -408,11 +406,6 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         return;
     }
 
-    // Open log file
-    var log_file: ?std.fs.File = std.fs.cwd().createFile("agent.log", .{ .truncate = false }) catch null;
-    if (log_file) |*f| f.seekFromEnd(0) catch {};
-    defer if (log_file) |f| f.close();
-
     stdout.print("=== Starting Interactive Planning Session ===\n", .{}) catch {};
     if (initial_context) |ctx| {
         stdout.print("Initial context: {s}\n", .{ctx}) catch {};
@@ -420,10 +413,6 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     stdout.print("Executor: {s}\n", .{executor}) catch {};
     stdout.print("\nThe agent will ask questions to understand your requirements,\n", .{}) catch {};
     stdout.print("then propose a plan for your approval before creating tasks.\n\n", .{}) catch {};
-    logToFile(allocator, log_file, "=== Interactive planning session started ===\n", .{});
-    if (initial_context) |ctx| {
-        logToFile(allocator, log_file, "Initial context: {s}\n", .{ctx});
-    }
 
     // Build and execute command in interactive mode (user converses with agent)
     var runner_args = buildExecutorArgs(allocator, executor, agent_cmd, prompt, true) catch return Error.OutOfMemory;
@@ -445,10 +434,8 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         stdout.print("\n=== Planning session completed ===\n", .{}) catch {};
         stdout.print("Run 'zagi tasks list' to see created tasks\n", .{}) catch {};
         stdout.print("Run 'zagi agent run' to execute tasks\n", .{}) catch {};
-        logToFile(allocator, log_file, "=== Planning session completed ===\n\n", .{});
     } else {
         stdout.print("\n=== Planning session ended ===\n", .{}) catch {};
-        logToFile(allocator, log_file, "=== Planning session ended ===\n\n", .{});
     }
 }
 
@@ -475,7 +462,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 /// - **Failure tolerance**: Tasks are skipped after 3 consecutive failures
 ///   to prevent infinite loops on broken tasks
 /// - **Safety limits**: Optional --max-tasks prevents runaway execution
-/// - **Observability**: All actions logged to agent.log
+/// - **Observability**: Output streamed to /tmp/zagi/<repo>/<task>.log
 /// - **Graceful completion**: Exits when all tasks done or all remaining
 ///   tasks have exceeded failure threshold
 fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
@@ -528,6 +515,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         i += 1;
     }
 
+    // Check ZAGI_AGENT_CMD for custom command override
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
     const executor = if (agent_cmd != null)
         std.posix.getenv("ZAGI_AGENT") orelse "claude" // Custom cmd bypasses validation
@@ -554,11 +542,9 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
     defer c.git_repository_free(repo);
 
-    // Create log file in temp directory: /tmp/zagi/<reponame>/<random>.log
-    var log_file: ?std.fs.File = null;
+    // Create log path in temp directory: /tmp/zagi/<reponame>/<random>.log
     var log_path_buf: [512]u8 = undefined;
-    const log_path = createLogFile(allocator, &log_path_buf, &log_file);
-    defer if (log_file) |f| f.close();
+    const log_path = createLogPath(&log_path_buf);
 
     if (log_path) |p| {
         stdout.print("Log file: {s}\n", .{p}) catch {};
@@ -591,7 +577,6 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 
     stdout.print("Starting RALPH loop...\n", .{}) catch {};
-    logToFile(allocator, log_file, "=== RALPH loop started ===\n", .{});
     if (dry_run) {
         stdout.print("(dry-run mode - no commands will be executed)\n", .{}) catch {};
     }
@@ -638,26 +623,34 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         const task = next_task.?;
         stdout.print("Starting task: {s}\n", .{task.id}) catch {};
         stdout.print("  {s}\n\n", .{task.content}) catch {};
-        logToFile(allocator, log_file, "Starting task: {s} - {s}\n", .{ task.id, task.content });
 
         if (dry_run) {
             stdout.print("Would execute:\n", .{}) catch {};
-            stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false)}) catch {};
+            if (agent_cmd) |cmd| {
+                // Show custom command with mode flags based on executor
+                if (std.mem.eql(u8, executor, "claude")) {
+                    stdout.print("  {s} -p \"<prompt>\"\n", .{cmd}) catch {};
+                } else if (std.mem.eql(u8, executor, "opencode")) {
+                    stdout.print("  {s} run \"<prompt>\"\n", .{cmd}) catch {};
+                } else {
+                    stdout.print("  {s} \"<prompt>\"\n", .{cmd}) catch {};
+                }
+            } else {
+                stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false)}) catch {};
+            }
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
-            const success = executeTask(allocator, executor, agent_cmd, exe_path, task.id, task.content, log_file) catch false;
+            const success = executeTask(allocator, executor, agent_cmd, exe_path, task.id, task.content, log_path) catch false;
 
             if (success) {
                 updateFailureCount(allocator, &consecutive_failures, task.id, 0);
                 tasks_completed += 1;
                 stdout.print("Task completed successfully\n\n", .{}) catch {};
-                logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
             } else {
                 const new_failures = (consecutive_failures.get(task.id) orelse 0) + 1;
                 updateFailureCount(allocator, &consecutive_failures, task.id, new_failures);
                 stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
-                logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
                 if (new_failures >= 3) {
                     stdout.print("Skipping task after 3 consecutive failures\n", .{}) catch {};
                 }
@@ -677,7 +670,6 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 
     stdout.print("RALPH loop completed. {} tasks processed.\n", .{tasks_completed}) catch {};
-    logToFile(allocator, log_file, "=== RALPH loop completed: {} tasks processed ===\n\n", .{tasks_completed});
 }
 
 const PendingTask = struct {
@@ -773,7 +765,7 @@ fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []c
     , .{ task_id, task_content, exe_path });
 }
 
-fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8, log_file: ?std.fs.File) !bool {
+fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8, log_path: ?[]const u8) !bool {
     const stderr_writer = std.fs.File.stderr().deprecatedWriter();
 
     const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
@@ -783,42 +775,74 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[
     var runner_args = try buildExecutorArgs(allocator, executor, agent_cmd, prompt, false);
     defer runner_args.deinit(allocator);
 
-    // Run the command and capture output
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = runner_args.items,
-    }) catch |err| {
+    // Build command string for shell execution with tee
+    var cmd_buf: [4096]u8 = undefined;
+    var cmd_len: usize = 0;
+
+    // Quote each argument and join
+    for (runner_args.items) |arg| {
+        if (cmd_len > 0) {
+            cmd_buf[cmd_len] = ' ';
+            cmd_len += 1;
+        }
+        // Add single quotes around arg, escaping any single quotes in it
+        cmd_buf[cmd_len] = '\'';
+        cmd_len += 1;
+        for (arg) |ch| {
+            if (ch == '\'') {
+                // End quote, add escaped quote, restart quote: '\''
+                if (cmd_len + 4 < cmd_buf.len) {
+                    cmd_buf[cmd_len] = '\'';
+                    cmd_buf[cmd_len + 1] = '\\';
+                    cmd_buf[cmd_len + 2] = '\'';
+                    cmd_buf[cmd_len + 3] = '\'';
+                    cmd_len += 4;
+                }
+            } else {
+                if (cmd_len < cmd_buf.len) {
+                    cmd_buf[cmd_len] = ch;
+                    cmd_len += 1;
+                }
+            }
+        }
+        cmd_buf[cmd_len] = '\'';
+        cmd_len += 1;
+    }
+
+    // Add tee to log file if we have a log path
+    if (log_path) |lp| {
+        const tee_suffix = std.fmt.bufPrint(cmd_buf[cmd_len..], " 2>&1 | tee '{s}'", .{lp}) catch return false;
+        cmd_len += tee_suffix.len;
+    }
+
+    const shell_cmd = cmd_buf[0..cmd_len];
+
+    // Run via shell to get tee piping
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", shell_cmd }, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    const term = child.spawnAndWait() catch |err| {
         stderr_writer.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
         return false;
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
 
-    // Echo output to console
-    if (result.stdout.len > 0) {
-        std.fs.File.stdout().writeAll(result.stdout) catch {};
-    }
-    if (result.stderr.len > 0) {
-        std.fs.File.stderr().writeAll(result.stderr) catch {};
-    }
+    const exited_ok = term == .Exited and term.Exited == 0;
 
-    // Write to log file
-    if (log_file) |f| {
-        f.writeAll(result.stdout) catch {};
-        if (result.stderr.len > 0) {
-            f.writeAll("\n--- stderr ---\n") catch {};
-            f.writeAll(result.stderr) catch {};
+    // Check log file for completion promise
+    var found_completion = false;
+    if (log_path) |lp| {
+        const log_content = std.fs.cwd().readFileAlloc(allocator, lp, 10 * 1024 * 1024) catch null;
+        if (log_content) |content| {
+            defer allocator.free(content);
+            const promise_start = "COMPLETION PROMISE: I confirm that:";
+            const promise_end = "-- I have not taken any shortcuts or skipped verification.";
+            const found_start = std.mem.indexOf(u8, content, promise_start) != null;
+            const found_end = std.mem.indexOf(u8, content, promise_end) != null;
+            found_completion = found_start and found_end;
         }
     }
-
-    // Check for completion promise - must have both first and last lines
-    const promise_start = "COMPLETION PROMISE: I confirm that:";
-    const promise_end = "-- I have not taken any shortcuts or skipped verification.";
-    const found_start = std.mem.indexOf(u8, result.stdout, promise_start) != null;
-    const found_end = std.mem.indexOf(u8, result.stdout, promise_end) != null;
-    const found_completion = found_start and found_end;
-
-    const exited_ok = result.term == .Exited and result.term.Exited == 0;
 
     if (!found_completion) {
         stderr_writer.print("Task did not output completion promise\n", .{}) catch {};
@@ -826,3 +850,91 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[
 
     return exited_ok and found_completion;
 }
+
+// Tests for buildExecutorArgs
+const testing = std.testing;
+
+test "buildExecutorArgs - claude headless includes -p" {
+    var args = try buildExecutorArgs(testing.allocator, "claude", null, "test prompt", false);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), args.items.len);
+    try testing.expectEqualStrings("claude", args.items[0]);
+    try testing.expectEqualStrings("-p", args.items[1]);
+    try testing.expectEqualStrings("test prompt", args.items[2]);
+}
+
+test "buildExecutorArgs - claude interactive no -p" {
+    var args = try buildExecutorArgs(testing.allocator, "claude", null, "test prompt", true);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), args.items.len);
+    try testing.expectEqualStrings("claude", args.items[0]);
+    try testing.expectEqualStrings("test prompt", args.items[1]);
+}
+
+test "buildExecutorArgs - opencode headless includes run" {
+    var args = try buildExecutorArgs(testing.allocator, "opencode", null, "test prompt", false);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), args.items.len);
+    try testing.expectEqualStrings("opencode", args.items[0]);
+    try testing.expectEqualStrings("run", args.items[1]);
+    try testing.expectEqualStrings("test prompt", args.items[2]);
+}
+
+test "buildExecutorArgs - opencode interactive no run" {
+    var args = try buildExecutorArgs(testing.allocator, "opencode", null, "test prompt", true);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), args.items.len);
+    try testing.expectEqualStrings("opencode", args.items[0]);
+    try testing.expectEqualStrings("test prompt", args.items[1]);
+}
+
+test "buildExecutorArgs - custom cmd with claude executor gets -p" {
+    // Custom command + ZAGI_AGENT=claude → adds -p for headless
+    var args = try buildExecutorArgs(testing.allocator, "claude", "my-claude --flag", "test prompt", false);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), args.items.len);
+    try testing.expectEqualStrings("my-claude", args.items[0]);
+    try testing.expectEqualStrings("--flag", args.items[1]);
+    try testing.expectEqualStrings("-p", args.items[2]);
+    try testing.expectEqualStrings("test prompt", args.items[3]);
+}
+
+test "buildExecutorArgs - custom cmd with opencode executor gets run" {
+    // Custom command + ZAGI_AGENT=opencode → adds run for headless
+    var args = try buildExecutorArgs(testing.allocator, "opencode", "my-opencode --flag", "test prompt", false);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), args.items.len);
+    try testing.expectEqualStrings("my-opencode", args.items[0]);
+    try testing.expectEqualStrings("--flag", args.items[1]);
+    try testing.expectEqualStrings("run", args.items[2]);
+    try testing.expectEqualStrings("test prompt", args.items[3]);
+}
+
+test "buildExecutorArgs - custom cmd with unknown executor no auto flags" {
+    // Custom command + unknown executor → no auto flags
+    var args = try buildExecutorArgs(testing.allocator, "aider", "aider --yes", "test prompt", false);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), args.items.len);
+    try testing.expectEqualStrings("aider", args.items[0]);
+    try testing.expectEqualStrings("--yes", args.items[1]);
+    try testing.expectEqualStrings("test prompt", args.items[2]);
+}
+
+test "buildExecutorArgs - custom cmd interactive no flags added" {
+    // Interactive mode never adds mode flags
+    var args = try buildExecutorArgs(testing.allocator, "claude", "my-claude --flag", "test prompt", true);
+    defer args.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), args.items.len);
+    try testing.expectEqualStrings("my-claude", args.items[0]);
+    try testing.expectEqualStrings("--flag", args.items[1]);
+    try testing.expectEqualStrings("test prompt", args.items[2]);
+}
+
