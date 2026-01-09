@@ -62,9 +62,6 @@ zagi agent plan "Add user authentication with JWT"
 
 # Preview the prompt without executing
 zagi agent plan --dry-run
-
-# Specify a model (passed to the executor)
-zagi agent plan --model claude-sonnet-4-20250514
 ```
 
 The planning agent follows an interactive protocol:

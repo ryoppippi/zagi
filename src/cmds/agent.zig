@@ -52,7 +52,6 @@ const plan_help =
     \\4. Create tasks only after you confirm
     \\
     \\Options:
-    \\  --model <model>      Model to use (optional, uses executor default)
     \\  --dry-run            Show prompt without executing
     \\  -h, --help           Show this help message
     \\
@@ -332,7 +331,6 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
-    var model: ?[]const u8 = null;
     var dry_run = false;
     var initial_context: ?[]const u8 = null;
 
@@ -340,14 +338,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     while (i < args.len) {
         const arg = std.mem.sliceTo(args[i], 0);
 
-        if (std.mem.eql(u8, arg, "--model")) {
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --model requires a model name\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            model = std.mem.sliceTo(args[i], 0);
-        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+        if (std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             stdout.print("{s}", .{plan_help}) catch {};
@@ -413,7 +404,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 
     // Build and execute command in interactive mode (user converses with agent)
-    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, true) catch return Error.OutOfMemory;
+    var runner_args = buildExecutorArgs(allocator, executor, null, agent_cmd, prompt, true) catch return Error.OutOfMemory;
     defer runner_args.deinit(allocator);
 
     var child = std.process.Child.init(runner_args.items, allocator);
