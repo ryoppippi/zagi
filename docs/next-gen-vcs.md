@@ -9,15 +9,99 @@ friction in software. Humans spend hours on READMEs. Agents can't even
 start. Codespaces and Gitpod attack this with cloud containers, but that's
 someone else's machine -- slow, expensive, locked in.
 
-Git tracks source. Nix tracks environments. They're separate systems with
-separate concepts, separate histories, separate mental models. When you
-change a dependency, that's a different workflow than changing a source
-file. It shouldn't be. **The environment is part of the code.**
+Git tracks your source. npm/pip/cargo track your dependencies. Docker
+tracks your system. Nix tracks your environment. Four systems, four mental
+models, four places where things go wrong. And a lock file in the middle
+holding it all together with string.
+
+**The environment is part of the code. Track it all in one place.**
 
 ## One Idea
 
-Version control where the environment is a first-class part of every
-change. Not "VCS + env manager." One system.
+Version control where everything is tracked. Source, dependencies,
+tools, services. No lock files. No install step. No separate package
+manager. One system.
+
+```
+$ curl -sf zagi.sh | sh
+$ zagi clone mattzcarey/zagi
+$ cd zagi
+$ zig build test    # works. no install. no README.
+```
+
+## No Lock Files
+
+Lock files exist because dependencies are external. You declare what
+you want (`package.json`), a solver figures out what that means
+(`package-lock.json`), and at install time you hope the registry still
+has those exact versions. The lock file is a prayer that the external
+world hasn't changed.
+
+**If the dependency is in the repo, you don't need a lock file.**
+
+zagi tracks dependencies the same way it tracks source: as
+content-addressed objects in the store. When you `zagi add express@4`,
+the actual code of express and all its transitive deps is pulled,
+hashed, and stored. It's in your project now. Not a pointer to npm.
+Not a version range. The code.
+
+```
+$ zagi add express@4
+
+Resolving express@4.21.0 + 62 deps...
+Stored: 4.2 MB (1847 chunks, 89% deduped from store)
+```
+
+The dependency source lives in the content-addressed store, referenced
+by your project. `zagi log` shows it as a change like any other:
+
+```
+$ zagi log
+  @  kpqx  matt: wip auth routes
+  o  vrnt  matt: add express@4.21.0 (62 deps)
+  o  zspm  matt: init project + node@22
+  o  root
+```
+
+Revert `vrnt` and express is gone. Checkout a branch that doesn't
+have express and it's not there. The dependency history IS the source
+history. One graph.
+
+### Edit your dependencies
+
+Want to patch a bug in a dependency? Just edit it.
+
+```
+$ zagi edit express         # opens node_modules/express in your editor
+                            # or an agent just edits the files directly
+
+$ zagi log
+  @  mfpz  matt: fix express body-parser edge case
+  o  vrnt  matt: add express@4.21.0 (62 deps)
+```
+
+When express releases 4.21.1, you upgrade and your change is
+re-applied automatically (jj-style conflict resolution). If it
+conflicts, the conflict is data -- you or an agent resolve it.
+No patch files. No fork. Just tracked changes on tracked code.
+
+Agents are great at this. "Update express and re-apply our body-parser
+fix" is a one-shot prompt.
+
+### Supply chain security
+
+npm install runs arbitrary postinstall scripts from strangers. Every
+`npm install` is a supply chain attack waiting to happen.
+
+zagi doesn't run install scripts. It stores source and pre-built
+binaries. The code is content-hashed. If someone publishes a
+compromised version of a package, it has a different hash. Your
+project still points to the original hash. Nothing changes unless
+you explicitly upgrade.
+
+No lock file to confuse. No registry to compromise at install time.
+No postinstall scripts executing on your machine. The code you
+reviewed is the code you run.
 
 ## User Experience
 
@@ -25,12 +109,10 @@ change. Not "VCS + env manager." One system.
 
 ```
 $ curl -sf zagi.sh | sh
-$ zagi clone github.com/mattzcarey/zagi
+$ zagi clone mattzcarey/zagi
 $ cd zagi
 $ zig build test    # works
 ```
-
-That's everything. No other steps. Here's what happened:
 
 **Line 1: Install.** Downloads a single static binary. No runtime, no
 dependencies, no Nix, no Docker, no FUSE, no sudo. One binary in
@@ -40,202 +122,201 @@ dependencies, no Nix, no Docker, no FUSE, no sudo. One binary in
 eval "$(zagi hook)"
 ```
 
-That's the only setup that ever happens. It runs once on first install.
-The hook does one thing: when you `cd` into a directory with `.zagi/env`,
-it prepends `.zagi/env/bin` to PATH and sets library paths. When you `cd`
-out, it undoes it. Like a lightweight direnv but built into zagi.
+The hook activates the environment when you `cd` into a zagi project
+(prepends `.zagi/env/bin` to PATH, sets library paths) and deactivates
+when you leave.
 
-**Line 2: Clone.** Fetches two things from the server in parallel:
-1. The source (git objects, like normal)
-2. A pre-built environment tarball (the server already built this)
+**Line 2: Clone.** Fetches source and the full environment in parallel
+from the content-addressed store. Dependencies, tools, services -- all
+pre-built for your OS/arch. Downloaded, not compiled, not installed.
 
-The env tarball extracts into `.zagi/env/` inside the project. It
-contains real binaries: the zig compiler, the bun runtime, libgit2.so,
-everything the project needs. These are pre-built on the server for your
-OS/arch. Downloaded, not compiled.
+**Line 3: cd.** Shell hook fires. Environment is active.
 
-**Line 3: cd.** The shell hook fires. PATH now includes `.zagi/env/bin`.
-Library paths include `.zagi/env/lib`. You're in a working environment.
+**Line 4: Build.** `zig` resolves to `.zagi/env/bin/zig`. Everything
+works.
 
-**Line 4: Build.** `zig` resolves to `.zagi/env/bin/zig`. It works.
-Everything works. No `npm install`, no `pip install`, no `apt-get`, no
-README.
+### What agents see
 
-### Second project, same machine
+An agent gets pointed at the directory. It sees a normal project where
+every tool, every dependency, every service is available. It doesn't
+know or care about zagi. It just runs commands and they work.
 
-```
-$ zagi clone github.com/someone/node-app
-$ cd node-app
-$ npm test    # works
-```
+Need redis for integration tests? It's there. Need to modify a
+dependency to debug an issue? Edit it, it's tracked. Need to run the
+full test suite against a real database? Postgres is running.
 
-Node 20 was already in the local store from a previous project. The
-clone just hardlinks it. Sub-second env setup.
-
-### Existing project, adding zagi
-
-```
-$ cd my-existing-project
-$ zagi init
-
-Detected: node 20, typescript, postgres
-Generated .zagi/env.toml
-
-$ zagi env pull
-
-Fetching env... done (1.2s)
-
-$ npm test    # now works without global node install
-```
-
-`zagi init` looks at your lockfiles and generates the env spec.
-`zagi env pull` fetches the pre-built env from the server.
-That's it. Two commands to make any existing project portable.
+The agent operates in prod-like state by default. No mocks unless you
+choose them.
 
 ### Day-to-day
 
 ```
-$ zagi add node@22           # adds node 22 to env.toml, fetches it
+$ zagi add postgres@16      # adds postgres to the environment
+$ zagi add lodash@4         # adds lodash source to deps
+$ zagi checkout feature     # switches source AND env atomically
+
 $ zagi log
-  @  kpqx  matt: upgrade to node 22
+  @  kpqx  matt: wip feature
+  o  vrnt  matt: add lodash@4, postgres@16
   o  main
 ```
 
-Adding a dependency is a versioned change, same as editing a source file.
-`zagi add` updates env.toml, resolves the new env, fetches the pre-built
-result, and records it as a change. You can revert it, diff it, branch
-from before it.
+No `npm install`. No `docker-compose up`. No `brew install postgresql`.
+Adding a dependency is a change. Switching branches switches everything.
 
-Switching branches switches the env:
+## How Storage Works
+
+Tracking all dependencies and tools means storing a lot of data.
+A typical Node project has 200MB+ of node_modules. A Python ML
+project can have GBs of packages. This is solvable.
+
+### Content-defined chunking
+
+Borrowed from Hugging Face's Xet storage (which handles 77 PB
+across 6M+ repos).
+
+Files are split into ~64KB chunks using a rolling hash (GearHash).
+Chunk boundaries are determined by the content itself, so inserting
+or modifying part of a file only affects nearby chunks. All other
+chunks remain identical.
 
 ```
-$ zagi checkout feature-branch
+express@4.21.0:
+  lib/router/index.js  -> chunks [a3f8, b7e2, c9d1]
+  lib/router/route.js  -> chunks [d4e5, f6a7]
+  ...
 
-Switching env: +postgres@16, node 20->22
-Done (180ms)
+express@4.21.1:
+  lib/router/index.js  -> chunks [a3f8, NEW1, c9d1]  # only middle changed
+  lib/router/route.js  -> chunks [d4e5, f6a7]         # identical, deduped
 ```
 
-No "remember to re-run nix develop." The env travels with the change.
+Upgrading express from 4.21.0 to 4.21.1 stores only the changed
+chunks. Everything else deduplicates.
 
-### What agents see
+### Cross-project deduplication
 
-An agent (Claude Code, Cursor, Codex, whatever) gets pointed at the
-directory. It sees a normal project where all tools are available.
-It doesn't know or care about zagi. It just runs commands and they work.
+10,000 projects use express 4.21.0. The chunks are stored **once**.
+Each project references them by hash. Node 22 is Node 22 whether
+it's for project A or project B. One copy.
 
-No agent integration needed. No plugin. No protocol. Just a directory
-where things work.
+In practice, 70-90% of a clone is already in the store because the
+same packages and tools are shared across projects. The first clone
+is slow. Every subsequent clone is fast.
 
-## Architecture
+### Chunks are grouped into packs
 
-### No Nix on the client
-
-Previous drafts had Nix on the client. Wrong. Nix is only on the
-server. The server builds environments. The client downloads pre-built
-binaries.
-
-The client is dumb. It does three things:
-1. Download files from the server
-2. Put them in the right place on disk
-3. Set PATH when you cd into a project
-
-That's it. No package manager, no solver, no build system on the client.
-One static binary.
-
-### The server builds everything
-
-The server has Nix. When someone pushes an env.toml change, or when
-a new mirror is created, the server:
-
-1. Reads env.toml
-2. Compiles it to a Nix derivation
-3. Builds the closure (or pulls from Nix binary cache)
-4. Packages it as a tarball per OS/arch (linux-x64, darwin-arm64, etc)
-5. Stores it in object storage, keyed by content hash
-
-The tarball is a self-contained environment. All binaries, all
-libraries, all tools. No symlinks to /nix/store. Relocatable.
-
-### Object storage
-
-Everything lives in object storage. Git objects, env tarballs, refs.
+Storing millions of ~64KB chunks as individual objects in S3 would
+be expensive. Chunks are grouped into ~64MB packs (like HF's xorbs).
+Downloads use HTTP Range requests to fetch specific chunks within a
+pack. Keeps object count manageable, enables CDN caching.
 
 ```
 s3://zagi/
-  objects/
-    ab/cdef1234...    # git blobs, trees, commits
-  envs/
-    a3f8c9d1-linux-x64.tar.zst     # pre-built env
-    a3f8c9d1-darwin-arm64.tar.zst
-  refs/
-    mattzcarey/zagi/heads/main     # branch pointers
+  packs/
+    ab/cdef1234.pack    # ~1024 chunks, ~64MB
+    cd/ef5678.pack
+  manifests/
+    mattzcarey/zagi/main.manifest    # maps paths to chunk hashes
 ```
 
-Content-addressed, CDN-cached, immutable. The server is thin -- mostly
-routing requests to object storage.
+### Clone size vs install time
 
-### The local store
+| Today | With zagi |
+|-------|-----------|
+| Clone: 5MB (source only) | Clone: 50MB (source + deps + tools) |
+| Then: npm install (200MB, 30s) | Then: nothing |
+| Then: brew install postgres (100MB) | |
+| Then: read README, configure env | |
+| Total: 300MB, 5 minutes | Total: 50MB (deduped), 10 seconds |
 
-Extracted env closures live in `~/.zagi/store/`, keyed by content hash.
-Projects hardlink from `.zagi/env/` into the store. Deduplication is
-automatic -- if two projects use Node 20, there's one copy on disk.
+The clone is bigger but the total is smaller because there's no
+install step, and cross-project dedup means most chunks are already
+local.
+
+### Lazy fetching
+
+Not everything needs to be downloaded on clone. The manifest lists
+all files and their chunk hashes. zagi can fetch lazily:
+
+- Tools and runtime: fetched immediately (you need these to build)
+- Direct dependencies: fetched immediately (you need these to run)
+- Transitive deps: fetched on first access
+- Dev dependencies: fetched when you run tests
+- Large assets: fetched on demand
+
+This keeps initial clone fast while still having everything available.
+
+## Architecture
+
+### Dumb client, smart server
+
+The client is a single static binary. It does:
+1. Download chunks from the server/CDN
+2. Assemble files from chunks
+3. Set PATH when you cd into a project
+
+No package manager, no solver, no build system on the client.
+
+### The server
+
+The server has Nix. When a new dependency is added or an env spec
+changes, the server:
+
+1. Resolves dependencies
+2. Builds everything (or pulls from Nix binary cache)
+3. Chunks the result (content-defined chunking)
+4. Deduplicates against the global store
+5. Stores new chunks in packs in object storage
+
+For mirrored repos, the server also parses lockfiles and existing
+package manifests to generate the initial env spec.
+
+### Object storage
+
+Everything lives in S3/R2/GCS:
+
+```
+s3://zagi/
+  packs/                         # chunked content
+    ab/cdef1234.pack
+  manifests/                     # path -> chunk mappings
+    mattzcarey/zagi/
+      main.manifest
+      feature-branch.manifest
+  objects/                       # git objects (commits, trees)
+    ab/cdef1234
+  refs/
+    mattzcarey/zagi/heads/main   # branch pointers
+```
+
+Content-addressed, CDN-cached, immutable packs. The server is thin.
+
+### Local store
 
 ```
 ~/.zagi/store/
-  a3f8c9d1/
-    bin/zig
-    bin/bun
-    lib/libgit2.so
-  b7e2a4f0/
-    bin/node
-    bin/npm
-    lib/...
-
-~/project-a/.zagi/env/ -> hardlinks to a3f8c9d1
-~/project-b/.zagi/env/ -> hardlinks to b7e2a4f0
+  packs/              # downloaded pack files
+  cache/              # extracted files, hardlinked into projects
 ```
+
+Multiple projects sharing express 4.21.0 share the same files
+on disk via hardlinks. Disk usage is proportional to unique content,
+not number of projects.
 
 ### One object model
 
 From jj: working copy is a change, stable change IDs, first-class
-conflicts, operation log.
+conflicts (rebases always succeed, conflicts are data), operation log
+(every mutation recorded, everything undoable).
 
-From Nix: content-addressed storage, declarative environments,
-reproducible resolution.
+From Nix: content-addressed storage, reproducible resolution.
 
-Combined: a change = source + env. The env.toml diff shows up in
-`zagi log` and `zagi diff` just like source changes. Checkout moves
-both source and env atomically.
+From HF/Xet: content-defined chunking, pack-based storage, cross-repo
+deduplication, lazy fetching.
 
-## The env spec
-
-```toml
-# .zagi/env.toml -- human-writable, auto-generated
-
-[project]
-name = "zagi"
-
-[tools]
-zig = "0.15"
-bun = "1.2"
-
-[system]
-packages = ["libgit2"]
-
-[services]
-# postgres = "16"
-```
-
-`env.lock` is generated, pinning every transitive dep to a content hash.
-Users don't edit the lock file. Same lock = same env, always.
-
-**Auto-detection for existing projects:**
-- `package.json` -> node + npm/bun/pnpm
-- `Cargo.toml` -> rust + cargo
-- `go.mod` -> go
-- `pyproject.toml` -> python + uv
-- `Dockerfile` -> parse and extract
-- `flake.nix` -> use directly
+Combined: **a change = source + deps + env.** One history, one graph,
+one diff, one revert. No lock files. No install step.
 
 ## Secrets
 
@@ -246,55 +327,57 @@ Encrypted in the repo, isolated from agents:
 ```
 
 - Decrypted into env vars when you run the app (`zagi run`)
-- Not in PATH, not in files -- only in the process env of `zagi run`
-- Agents cannot access them (they run outside `zagi run`)
-- Never in git history, never in plaintext on disk
+- Agents cannot access them (process namespace isolation)
+- Never in history, never in plaintext on disk
 
 ## Why Not X
 
+**Why not npm/pip/cargo + lock files?**
+Lock files are a workaround for external dependencies. If deps are
+tracked in the VCS, lock files are unnecessary. And install scripts
+are a supply chain attack surface.
+
+**Why not vendoring (Go-style)?**
+Go vendor copies deps into the repo as regular files. This bloats git
+history (git stores full copies, no chunk-level dedup) and makes
+updates painful. zagi's content-addressed chunking solves both: dedup
+across versions and across projects.
+
 **Why not Nix directly?**
-Nix the technology is right. Nix the product failed. Learning curve,
-documentation, "experimental" flakes, massive client-side install.
-zagi uses Nix on the server and hides it completely.
+Nix the technology is right. Nix the product failed. zagi uses Nix
+on the server and hides it completely.
 
 **Why not Docker?**
 Docker is for deployment. Imperative, non-reproducible, isolated VM.
-You can't point Cursor at a container and have it feel native.
-
-**Why not devcontainers?**
-Container. Tied to VS Code. Requires Docker. Manual setup.
-
-**Why not Homebrew / asdf / mise?**
-Package managers, not version control. They don't travel with the code.
-`brew install node` is global, not per-project. And they don't include
-system libraries.
 
 ## Build In The Open
 
-Everything is open source. The moat is the public cache (pre-built
-envs for every popular project) and network effect.
+Everything is open source. The moat is the global content-addressed
+store (every package, every tool, every version, chunked and deduped)
+and the network effect.
 
 ## What To Build
 
 ```
-$ zagi clone github.com/some/repo
-$ cd repo
+$ zagi clone mattzcarey/zagi
+$ cd zagi
 $ <it runs>
 ```
 
-1. **Auto-detection.** Infer env.toml from lockfiles. JS/TS, Python,
-   Rust, Go, Zig first.
+1. **Content-addressed store.** Chunking, dedup, pack storage.
+   This is the foundation everything else sits on.
 
-2. **Server-side builds.** Compile env.toml to Nix, build, package
-   as relocatable tarball per OS/arch. Store in object storage.
+2. **Dependency tracking.** `zagi add express@4` resolves, chunks,
+   and stores deps. No lock file. Source is in the store.
 
-3. **Client fetch + activate.** Download tarball, extract to store,
-   hardlink into project. Shell hook for PATH activation.
+3. **Auto-detection.** Infer deps from existing lockfiles for
+   migration. JS/TS, Python, Rust, Go, Zig first.
 
-4. **Object storage backend.** Git objects + env tarballs in S3/R2.
+4. **Server-side builds.** Compile env specs to Nix, build tools
+   and runtimes, chunk and store in object storage.
 
-5. **Public cache.** Pre-built envs for top 1000 GitHub projects.
-   First clone is fast for everyone.
+5. **Clone.** Fetch manifest, download chunks (deduped against
+   local store), assemble files, activate env.
 
-6. **Mirror.** `zagi mirror github.com/foo/bar` generates env.toml
-   and pre-builds the env. Viral: "I made your repo runnable."
+6. **Mirror.** `zagi mirror github.com/foo/bar` converts a GitHub
+   repo into a fully tracked zagi project. Viral loop.
