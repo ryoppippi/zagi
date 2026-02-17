@@ -19,70 +19,198 @@ file. It shouldn't be. **The environment is part of the code.**
 Version control where the environment is a first-class part of every
 change. Not "VCS + env manager." One system.
 
+## User Experience
+
+### Fresh machine to running project
+
 ```
+$ curl -sf zagi.sh | sh
 $ zagi clone github.com/mattzcarey/zagi
-
-Cloning... done
-Resolving env... cached (280ms)
-
 $ cd zagi
-$ zig build test    # just works. no install step. no README.
+$ zig build test    # works
 ```
 
-The clone gives you source AND a resolved environment -- compilers,
-runtimes, system libraries, all present, correct versions. It mounts to
-your local filesystem. You use your own editor, your own agent, your own
-terminal. Everything just works.
+That's everything. No other steps. Here's what happened:
 
-**How this differs from today:**
-- `git clone` gives you source. You figure out the rest.
-- `zagi clone` gives you a runnable project. There is no rest.
+**Line 1: Install.** Downloads a single static binary. No runtime, no
+dependencies, no Nix, no Docker, no FUSE, no sudo. One binary in
+`~/.local/bin`. Adds one line to your shell rc:
 
-## Design
+```bash
+eval "$(zagi hook)"
+```
 
-### One object model
+That's the only setup that ever happens. It runs once on first install.
+The hook does one thing: when you `cd` into a directory with `.zagi/env`,
+it prepends `.zagi/env/bin` to PATH and sets library paths. When you `cd`
+out, it undoes it. Like a lightweight direnv but built into zagi.
 
-Take the best ideas from jj and Nix. Combine them into one thing that
-zagi exposes through a CLI.
+**Line 2: Clone.** Fetches two things from the server in parallel:
+1. The source (git objects, like normal)
+2. A pre-built environment tarball (the server already built this)
 
-**From jj:**
-- Working copy is always a change (no staging area)
-- Changes have stable IDs across rewrites
-- First-class conflicts (rebases never fail, conflicts are data)
-- Operation log (every mutation is recorded, everything is undoable)
+The env tarball extracts into `.zagi/env/` inside the project. It
+contains real binaries: the zig compiler, the bun runtime, libgit2.so,
+everything the project needs. These are pre-built on the server for your
+OS/arch. Downloaded, not compiled.
 
-**From Nix:**
-- Content-addressed storage (identity = contents)
-- Declarative environments (TOML, not Nix expressions)
-- Reproducible resolution (same spec = same result, always)
-- Deduplication (most projects share 90% of their env)
+**Line 3: cd.** The shell hook fires. PATH now includes `.zagi/env/bin`.
+Library paths include `.zagi/env/lib`. You're in a working environment.
 
-**Combined: a change = source + env.**
+**Line 4: Build.** `zig` resolves to `.zagi/env/bin/zig`. It works.
+Everything works. No `npm install`, no `pip install`, no `apt-get`, no
+README.
 
-When you change a source file, that's a change. When you add a dependency,
-that's also a change. Same history, same diff, same revert. The env isn't
-a sidecar config file that you hope stays in sync -- it IS the versioned
-state.
+### Second project, same machine
 
 ```
+$ zagi clone github.com/someone/node-app
+$ cd node-app
+$ npm test    # works
+```
+
+Node 20 was already in the local store from a previous project. The
+clone just hardlinks it. Sub-second env setup.
+
+### Existing project, adding zagi
+
+```
+$ cd my-existing-project
+$ zagi init
+
+Detected: node 20, typescript, postgres
+Generated .zagi/env.toml
+
+$ zagi env pull
+
+Fetching env... done (1.2s)
+
+$ npm test    # now works without global node install
+```
+
+`zagi init` looks at your lockfiles and generates the env spec.
+`zagi env pull` fetches the pre-built env from the server.
+That's it. Two commands to make any existing project portable.
+
+### Day-to-day
+
+```
+$ zagi add node@22           # adds node 22 to env.toml, fetches it
 $ zagi log
-  @  kpqx  (working) matt: wip auth flow
-  o  vrnt  matt: add jwt middleware + jsonwebtoken@9.0
-  o  zspm  matt: add user model + postgres@16
+  @  kpqx  matt: upgrade to node 22
   o  main
 ```
 
-`zspm` added source files AND postgres 16 to the environment. Checking
-out `zspm` gives you the code at that point AND a running postgres 16.
-Checking out `main` doesn't have postgres. The environment travels with
-the change.
+Adding a dependency is a versioned change, same as editing a source file.
+`zagi add` updates env.toml, resolves the new env, fetches the pre-built
+result, and records it as a change. You can revert it, diff it, branch
+from before it.
 
-### The env spec
+Switching branches switches the env:
 
-Lives in the repo, versioned like any other file:
+```
+$ zagi checkout feature-branch
+
+Switching env: +postgres@16, node 20->22
+Done (180ms)
+```
+
+No "remember to re-run nix develop." The env travels with the change.
+
+### What agents see
+
+An agent (Claude Code, Cursor, Codex, whatever) gets pointed at the
+directory. It sees a normal project where all tools are available.
+It doesn't know or care about zagi. It just runs commands and they work.
+
+No agent integration needed. No plugin. No protocol. Just a directory
+where things work.
+
+## Architecture
+
+### No Nix on the client
+
+Previous drafts had Nix on the client. Wrong. Nix is only on the
+server. The server builds environments. The client downloads pre-built
+binaries.
+
+The client is dumb. It does three things:
+1. Download files from the server
+2. Put them in the right place on disk
+3. Set PATH when you cd into a project
+
+That's it. No package manager, no solver, no build system on the client.
+One static binary.
+
+### The server builds everything
+
+The server has Nix. When someone pushes an env.toml change, or when
+a new mirror is created, the server:
+
+1. Reads env.toml
+2. Compiles it to a Nix derivation
+3. Builds the closure (or pulls from Nix binary cache)
+4. Packages it as a tarball per OS/arch (linux-x64, darwin-arm64, etc)
+5. Stores it in object storage, keyed by content hash
+
+The tarball is a self-contained environment. All binaries, all
+libraries, all tools. No symlinks to /nix/store. Relocatable.
+
+### Object storage
+
+Everything lives in object storage. Git objects, env tarballs, refs.
+
+```
+s3://zagi/
+  objects/
+    ab/cdef1234...    # git blobs, trees, commits
+  envs/
+    a3f8c9d1-linux-x64.tar.zst     # pre-built env
+    a3f8c9d1-darwin-arm64.tar.zst
+  refs/
+    mattzcarey/zagi/heads/main     # branch pointers
+```
+
+Content-addressed, CDN-cached, immutable. The server is thin -- mostly
+routing requests to object storage.
+
+### The local store
+
+Extracted env closures live in `~/.zagi/store/`, keyed by content hash.
+Projects hardlink from `.zagi/env/` into the store. Deduplication is
+automatic -- if two projects use Node 20, there's one copy on disk.
+
+```
+~/.zagi/store/
+  a3f8c9d1/
+    bin/zig
+    bin/bun
+    lib/libgit2.so
+  b7e2a4f0/
+    bin/node
+    bin/npm
+    lib/...
+
+~/project-a/.zagi/env/ -> hardlinks to a3f8c9d1
+~/project-b/.zagi/env/ -> hardlinks to b7e2a4f0
+```
+
+### One object model
+
+From jj: working copy is a change, stable change IDs, first-class
+conflicts, operation log.
+
+From Nix: content-addressed storage, declarative environments,
+reproducible resolution.
+
+Combined: a change = source + env. The env.toml diff shows up in
+`zagi log` and `zagi diff` just like source changes. Checkout moves
+both source and env atomically.
+
+## The env spec
 
 ```toml
-# .zagi/env.toml
+# .zagi/env.toml -- human-writable, auto-generated
 
 [project]
 name = "zagi"
@@ -98,12 +226,10 @@ packages = ["libgit2"]
 # postgres = "16"
 ```
 
-`env.lock` is generated. Every transitive dep has a content hash.
-Same lock = same environment on any machine, every time.
+`env.lock` is generated, pinning every transitive dep to a content hash.
+Users don't edit the lock file. Same lock = same env, always.
 
-**Users don't write this from scratch.** `zagi init` detects your
-project and generates it:
-
+**Auto-detection for existing projects:**
 - `package.json` -> node + npm/bun/pnpm
 - `Cargo.toml` -> rust + cargo
 - `go.mod` -> go
@@ -111,133 +237,44 @@ project and generates it:
 - `Dockerfile` -> parse and extract
 - `flake.nix` -> use directly
 
-If inference is wrong, you fix the TOML. It's right forever after.
+## Secrets
 
-Nix resolves the spec under the hood. Users never see Nix. You write
-`zig = "0.15"`, not a Nix expression.
-
-### The mount
-
-`zagi clone` mounts the resolved environment alongside your source:
+Encrypted in the repo, isolated from agents:
 
 ```
-~/zagi/                         # your working directory
-  src/                          # source (read-write)
-  build.zig
-  ...
-  .zagi/env/                    # resolved env (read-only, cached)
-    bin/zig
-    bin/bun
-    lib/libgit2.so
+.zagi/secrets.enc     # age-encrypted, keyed to your identity
 ```
 
-When you `cd` in, the env activates (PATH, lib paths, etc). When you
-leave, it deactivates. No global pollution. Not a container -- your
-actual filesystem, your actual shell.
-
-FUSE on Linux, macFUSE or symlink forest on macOS. Fallback:
-hardlinks from the content-addressed store.
-
-### The store
-
-Content-addressed, file-level dedup, local:
-
-```
-~/.zagi/store/
-  a3f8c9d1.../    # zig 0.15 closure
-  b7e2a4f0.../    # node 20 + pnpm
-```
-
-Most environments overlap. Node 20 is Node 20 whether it's for
-project A or project B. Mounting a second Node project when you
-already have Node cached = instant.
-
-### Secrets
-
-Secrets in the repo but isolated from agents:
-
-```
-.zagi/secrets.enc     # encrypted with age, keyed to your identity
-```
-
-- Decrypted at mount time for app processes
-- Not accessible to agent processes (mount namespace isolation)
+- Decrypted into env vars when you run the app (`zagi run`)
+- Not in PATH, not in files -- only in the process env of `zagi run`
+- Agents cannot access them (they run outside `zagi run`)
 - Never in git history, never in plaintext on disk
-
-An agent can build, test, and modify source. It cannot read your
-Stripe key. Kernel-level isolation, not honor system.
-
-## The Server
-
-The zagi server lives on object storage natively. Not a filesystem
-pretending to be a server. S3/R2/GCS as the source of truth.
-
-Git already works in objects (blobs, trees, commits). The server maps
-these directly to object storage keys. Content-addressed objects in a
-bucket.
-
-```
-s3://zagi-store/
-  objects/
-    ab/cdef1234...    # git objects (blobs, trees, commits)
-  envs/
-    a3/f8c9d1...      # resolved environment closures
-  refs/
-    heads/main        # branch pointers
-```
-
-**Why object storage:**
-- Infinitely scalable, zero ops
-- Content-addressed objects map 1:1 to bucket keys
-- CDN-friendly (immutable objects, cache forever)
-- Cheap (pennies per GB)
-- Env closures and git objects share the same storage model
-- No filesystem server to maintain, scale, or fail
-
-The public cache for pre-built environments is the same bucket.
-Push an env closure, anyone can pull it. First-time clone of a
-popular project fetches pre-built binaries instead of building.
 
 ## Why Not X
 
-**Why not git + Nix separately?**
-Two systems, two mental models, two histories. When you revert a
-commit, your env doesn't revert. When you switch branches, you
-have to remember to re-run `nix develop`. The whole point is:
-they should be one thing.
-
 **Why not Nix directly?**
-Nix the technology is right. Nix the product failed. The learning
-curve, the documentation, the "experimental" flakes. zagi uses Nix
-as a backend and hides it behind TOML.
+Nix the technology is right. Nix the product failed. Learning curve,
+documentation, "experimental" flakes, massive client-side install.
+zagi uses Nix on the server and hides it completely.
 
 **Why not Docker?**
-Docker is for deployment. It's imperative, non-reproducible, and
-gives you an isolated VM instead of a local directory. You can't
-point Cursor at a running container and have it feel native.
+Docker is for deployment. Imperative, non-reproducible, isolated VM.
+You can't point Cursor at a container and have it feel native.
 
 **Why not devcontainers?**
 Container. Tied to VS Code. Requires Docker. Manual setup.
-Doesn't version-control the env with the code.
+
+**Why not Homebrew / asdf / mise?**
+Package managers, not version control. They don't travel with the code.
+`brew install node` is global, not per-project. And they don't include
+system libraries.
 
 ## Build In The Open
 
-Everything is open source:
-- `zagi` CLI (Zig + libgit2, already open)
-- Environment resolution (TOML -> Nix compilation)
-- Mount implementation
-- Object storage protocol
-- Auto-detection heuristics
-
-The value is in the public cache (pre-built envs for popular repos)
-and the network effect (more repos with env specs = more useful for
-everyone).
-
-Service opportunities: hosted cache, mirrors, team secrets.
+Everything is open source. The moat is the public cache (pre-built
+envs for every popular project) and network effect.
 
 ## What To Build
-
-One command that works end to end:
 
 ```
 $ zagi clone github.com/some/repo
@@ -245,22 +282,19 @@ $ cd repo
 $ <it runs>
 ```
 
-In order:
+1. **Auto-detection.** Infer env.toml from lockfiles. JS/TS, Python,
+   Rust, Go, Zig first.
 
-1. **Auto-detection.** Given a repo, infer env.toml from lockfiles
-   and config. JS/TS, Python, Rust, Go, Zig first.
+2. **Server-side builds.** Compile env.toml to Nix, build, package
+   as relocatable tarball per OS/arch. Store in object storage.
 
-2. **Env resolution.** Compile env.toml to Nix. Build. Cache in
-   local content-addressed store.
+3. **Client fetch + activate.** Download tarball, extract to store,
+   hardlink into project. Shell hook for PATH activation.
 
-3. **Mount.** Overlay source + env. Shell hook for activation.
-   Start simple (symlinks + direnv), upgrade to FUSE.
+4. **Object storage backend.** Git objects + env tarballs in S3/R2.
 
-4. **Object storage server.** Git objects + env closures in S3.
-   Content-addressed, CDN-cached.
+5. **Public cache.** Pre-built envs for top 1000 GitHub projects.
+   First clone is fast for everyone.
 
-5. **Public cache.** Pre-built envs for popular projects. First
-   clone is a download, not a build.
-
-6. **Mirror.** `zagi mirror github.com/foo/bar` auto-detects env,
-   builds, caches. Viral loop: "I made your repo runnable."
+6. **Mirror.** `zagi mirror github.com/foo/bar` generates env.toml
+   and pre-builds the env. Viral: "I made your repo runnable."
