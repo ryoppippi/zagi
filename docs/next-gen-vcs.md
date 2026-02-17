@@ -1,278 +1,275 @@
 # Next-Gen VCS: Design Spec
 
-> git clone = ssh into a running app
+> git clone, but it runs
 
-## The Problem
+## One Problem
 
-Git solves source tracking. GitHub solves collaboration around source. Neither solves the actual problem for agents (or increasingly, humans): **I cloned the repo, now what?**
+The gap between `git clone` and "the thing works" is the single biggest
+friction in software. Every repo is a puzzle: which runtime, which package
+manager, which system deps, which env vars, which services, which version
+of which tool. Humans spend hours on READMEs. Agents can't even start.
 
-The gap between `git clone` and `the thing runs` is enormous. Every repo has different languages, package managers, system deps, database requirements, env vars, secrets. An agent can read code instantly but can't run it without a working environment. Sparkles, Codespaces, Gitpod -- they all attack this gap. But they're bolted on top of GitHub. The platform itself doesn't understand environments.
+Codespaces and Gitpod attack this with cloud containers. But that's someone
+else's machine. You can't use your own tools, your own agent, your own
+workflow. And it's slow, expensive, and requires internet.
 
-Mitchell Hashimoto's insight: **GitHub is the issue, not git.** Git and jj can be stressed further -- using worktrees, refs, notes, content-addressed storage, all the primitives that already exist. The hosting/collaboration layer is what's broken.
+## One Solution
 
-## Core Thesis
-
-Build a platform where:
-
-1. **Every repo is runnable from checkout.** Not "follow the README" -- actually runnable. The environment is part of the repo, resolved and cached on the server.
-2. **Opening a repo starts a session.** You don't clone and stare at files. You get a running environment with an agent ready to help. `git clone` = `ssh into a running app`.
-3. **Code review is agent-native.** Not "here's a diff, leave a comment." Agents review continuously, in small bites, as code is written.
-4. **Migration is trivial.** Mirror any GitHub repo. Everything works immediately. No lock-in on the VCS layer -- git underneath, jj optional.
-
-## Architecture
+**Mount any repo as a runnable directory on your local filesystem.**
 
 ```
-+--------------------------------------------------+
-|                   Platform                        |
-|                                                   |
-|  +---------------------------------------------+ |
-|  |              Environment Layer               | |
-|  |  Nix-based, content-addressed, cached        | |
-|  |  Every repo has a resolved env on the server | |
-|  +---------------------------------------------+ |
-|  |              Session Layer                   | |
-|  |  Ephemeral containers, agent-first UX        | |
-|  |  "Open repo" = running env + agent           | |
-|  +---------------------------------------------+ |
-|  |              Review Layer                    | |
-|  |  Continuous, bitesized, agent-assisted       | |
-|  |  Not PR-shaped -- change-shaped              | |
-|  +---------------------------------------------+ |
-|  |              VCS Layer                       | |
-|  |  git/jj underneath, use all features         | |
-|  |  Worktrees, refs, notes, content-addressing  | |
-|  +---------------------------------------------+ |
-+--------------------------------------------------+
+$ zagi mount github.com/mattzcarey/zagi ./zagi
+
+Resolving environment... cached
+Mounting... done (340ms)
+
+$ cd zagi
+$ zig build test    # just works
+$ bun run test      # just works
 ```
 
-### Layer 1: VCS (git/jj)
+That's it. The directory has the source code AND a fully resolved
+environment. The right compilers, runtimes, packages, system libraries --
+all present, all the correct versions. No install step. No README. No
+Dockerfile. It works.
 
-Don't replace git. Stress it further.
+You open this directory in whatever you want. VS Code. Neovim. Cursor.
+You point Claude Code at it. You point Codex at it. Any agent, any editor.
+They all see a normal directory where everything works.
 
-**Use jj semantics on top of git storage:**
-- Working copy is always a commit (no staging area, simpler for agents)
-- First-class conflicts (rebases never fail, conflicts are data)
-- Stable change IDs (track a unit of work across rewrites)
-- Operation log (every mutation is recorded, everything is undoable)
+This is `git clone` that gives you a running VM, except it's a local
+directory and it's instant.
 
-**Use git's underused primitives:**
-- `refs/envs/*` -- environment snapshots stored as git objects
-- `refs/notes/*` -- agent metadata, prompts, session logs (zagi already does this)
-- Worktrees for parallel agent work (zagi forks)
-- Content-addressed blob storage for dependency caching
+## How It Works
 
-**Why not replace git:** Migration cost is the killer. If you need people to learn a new VCS, you've already lost. jj-on-git is the right wedge -- same storage, better UX, zero migration cost.
+### The mount
 
-### Layer 2: Environment
+Under the hood, `zagi mount` does three things:
 
-Every repo gets a resolved, cached, runnable environment. This is the hard part and the moat.
+1. **Fetches the source** -- git clone, sparse checkout, whatever is fastest
+2. **Resolves the environment** -- deterministic, content-addressed, cached
+3. **Assembles the overlay** -- source (read-write) on top of env (read-only)
 
-**The env spec lives in the repo:**
+The result is a single directory. Inside it, `PATH`, library paths, and
+tool locations all point to the resolved environment. It's not a container.
+It's not a VM. It's an overlay mount on your actual filesystem. Your
+terminal, your shell, your tools -- they all work normally. You just `cd`
+into it.
+
+```
+~/zagi/                         # what you see
+  src/                          # your source (read-write)
+  build.zig
+  ...
+  .zagi/env/                    # resolved environment (read-only, cached)
+    bin/zig                     # zig 0.15
+    bin/bun                     # bun 1.2
+    lib/libgit2.so              # libgit2
+    ...
+```
+
+When you `cd` into a mounted repo, the environment activates (like `nix
+develop` but invisible). When you leave, it deactivates. No global
+pollution.
+
+### The environment spec
+
+The spec lives in the repo:
+
 ```
 .zagi/
-  env.nix          # declarative environment (nix flake)
-  env.lock         # pinned, resolved, reproducible
-  secrets.enc      # encrypted secrets manifest
-  agents.toml      # agent permissions and capabilities
+  env.toml       # what the project needs (human-readable)
+  env.lock       # exact versions, content hashes (generated)
 ```
 
-**How environments work:**
+`env.toml` is simple:
 
-1. **Declare.** `env.nix` describes what the project needs: language runtimes, system packages, services (postgres, redis), tools. Nix because it's the only system that actually delivers reproducibility.
+```toml
+[project]
+name = "zagi"
 
-2. **Resolve.** `env.lock` pins every transitive dependency to a content hash. This is generated, not hand-written. Think `flake.lock` but also covering services and infra.
+[tools]
+zig = "0.15"
+bun = "1.2"
 
-3. **Cache.** The platform pre-builds and caches environment closures. When you "clone" a repo, the environment is already built. Nothing to install. Nix's content-addressed store means deduplication is automatic -- most repos share 90% of their env (glibc, coreutils, common runtimes).
+[system]
+packages = ["libgit2"]
 
-4. **Materialize.** Checkout assembles an overlay: cached env layers (read-only) + source tree (read-write). This is sub-second. No `npm install`, no `pip install`, no `apt-get`. It's already there.
-
-**For repos without env specs (i.e., all existing repos):**
-
-This is the migration story. The platform **infers** the environment:
-- Detect language from file extensions, lockfiles, config files
-- Parse `package.json`, `Cargo.toml`, `go.mod`, `requirements.txt`, `Dockerfile`, `docker-compose.yml`
-- Generate a candidate `env.nix` automatically
-- Run it, see if tests pass, iterate
-
-An agent does this. That's the bootstrap: "mirror this GitHub repo" triggers an agent that figures out how to make it run, commits the env spec, and now it's a runnable repo.
-
-### Layer 3: Sessions
-
-Opening a repo doesn't show you files. It drops you into a running environment.
-
-**What a session looks like:**
-
-```
-$ zagi open mattzcarey/zagi
-
-Resolving environment... cached (247ms)
-Starting session...
-
-zagi v0.3.0 | zig 0.15 | bun 1.2
-Tests: 47 passing | Build: ok
-Agent: ready
-
->
+[services]
+# postgres = "16"    # if you need it
 ```
 
-You're in. The project is built. Tests have run. An agent is available. You can start talking, start coding, or both.
+`env.lock` is generated and pinned. Every transitive dependency has a
+content hash. Same lock file = same environment on any machine, every time.
 
-**Session primitives:**
-- **Ephemeral container** per session, built from the env spec
-- **Agent attached** by default (Claude Code, configurable)
-- **State is a commit** -- your working state is always a jj-style change, auto-snapshotted
-- **Sessions are forkable** -- branch a session to try something different
-- **Sessions are shareable** -- send someone a link, they get the exact same state
+**Users don't write this.** For new projects, `zagi init` generates it by
+detecting your project. For existing repos, `zagi mount` infers it:
 
-**Agent capabilities in sessions:**
-- Full read/write to source tree
-- Can run builds, tests, linters
-- Can create/amend changes
-- **Cannot** read secrets (separate mount, ACL-controlled)
-- **Cannot** push to protected branches without human approval
-- All actions logged in operation log
+- `package.json` -> node + npm/bun/pnpm
+- `Cargo.toml` -> rust + cargo
+- `go.mod` -> go
+- `requirements.txt` / `pyproject.toml` -> python + pip/uv
+- `Dockerfile` -> parse and extract
+- `flake.nix` -> use directly
 
-**Secret isolation:**
+If the inference is wrong, you fix `env.toml` and it's right forever.
 
-Secrets are the hard problem. They need to exist (the app needs them to run) but agents shouldn't exfiltrate them.
+### The cache
 
-```
-.zagi/secrets.enc
-  DATABASE_URL=enc:xxx
-  API_KEY=enc:xxx
-  STRIPE_SECRET=enc:xxx
-```
-
-- Encrypted at rest, decrypted only inside the session container
-- Mounted as env vars, not files (harder to accidentally `cat`)
-- Agent process gets a filtered env: secrets are resolved for the app runtime but not exposed to the agent's stdin/stdout
-- Audit log for every secret access
-- Scoped: agents can be granted access to specific secrets (e.g., test API keys but not prod)
-
-### Layer 4: Review
-
-Code review is broken. PRs are too big, reviews come too late, and the feedback loop is days not minutes.
-
-**Change-shaped, not PR-shaped:**
-
-Adopt jj's model. A "change" is a small, logical unit of work. Changes stack naturally. Review happens per-change, not per-PR.
+Environments are built from Nix under the hood, but users never see Nix.
+The `env.toml` compiles down to a Nix derivation. The result is
+content-addressed and cached.
 
 ```
-$ zagi log
-  @  kpqx  (working) matt: wip auth flow
-  o  vrnt  matt: add JWT verification middleware
-  o  zspm  matt: add user model and migrations
-  o  main  (trunk)
+~/.zagi/store/
+  a3f8c9d1.../    # zig 0.15 + bun 1.2 + libgit2
+  b7e2a4f0.../    # node 20 + pnpm + postgres-client
+  ...
 ```
 
-Each change can be reviewed independently. `zspm` (user model) doesn't need to wait for `kpqx` (auth flow) to be reviewed.
+Most environments share 90%+ of their contents (glibc, coreutils, common
+runtimes). The store deduplicates at the file level. Mounting a new repo
+that uses Node 20 when you already have Node 20 cached = instant.
 
-**Continuous review:**
+A public cache server means first-time setup is a download, not a build.
+Like Nix binary caches but for complete project environments.
 
-Agents review as you work, not after you push:
-- Type-checking, linting, test results -- immediate, in the session
-- Semantic review: "this function doesn't handle the error case from line 34" -- surfaced as you write
-- Security scanning: "this SQL query is injectable" -- blocked before commit
+### Secrets
 
-**Bitesized review for humans:**
-
-When human review is needed:
-- Changes are presented one at a time, smallest first
-- Each change has context: the prompt that created it, the test results, the agent's confidence level
-- Review actions: approve, request changes, "looks fine, ship it"
-- No "LGTM" culture -- the agent already validated correctness. Human review is for intent and architecture.
-
-**Review fast:**
-
-The platform pre-computes everything a reviewer needs:
-- Diff with syntax highlighting and semantic annotations
-- Test results for this specific change (not the whole branch)
-- Impact analysis: what other code is affected by this change
-- Agent summary: "This change adds JWT middleware. It imports `jsonwebtoken`, validates tokens in the `Authorization` header, and returns 401 on failure."
-
-## Viral Mechanics
-
-The product needs a consumer-grade growth loop. Technical superiority alone doesn't win.
-
-### Mirrors
-
-The lowest-friction entry point: mirror your GitHub repos.
+Secrets live in the repo directory but are isolated:
 
 ```
-$ zagi mirror github.com/mattzcarey/zagi
-
-Mirroring mattzcarey/zagi...
-Detecting environment... node 20, zig 0.15, bun 1.2
-Generating env spec... done
-Running tests... 47/47 passing
-Mirror ready: zagi.sh/mattzcarey/zagi
+.zagi/
+  secrets.enc     # encrypted, only decrypted at runtime
 ```
 
-Your repo now has a runnable environment on the platform. Anyone can open it and immediately have a working session. GitHub stays the source of truth if you want -- the mirror syncs both ways.
+- Encrypted with age, keyed to your identity
+- Decrypted into the environment at mount time
+- Available to the app process (your server can read DATABASE_URL)
+- **Not available to agents** -- the agent process sees the directory but
+  secrets are mounted into a separate namespace that only child processes
+  of `zagi run` can access
+- Never in git history, never in plaintext on disk
 
-**Why mirrors are viral:**
-- Zero commitment to try ("just mirror it, nothing changes")
-- Immediately useful ("wait, anyone can run my project now?")
-- Shareable ("here's a link, click it, you're in a running env")
-- Progressive adoption (start with mirror, maybe start pushing here instead)
+An agent can build your code, run your tests, modify your source -- but it
+physically cannot read your Stripe key. The isolation is at the mount
+level, not the honor system.
 
-### "Run this repo" button
+## What Changes
 
-A badge for READMEs:
+| Today | With zagi mount |
+|-------|----------------|
+| Clone, read README, install deps, debug errors, give up | Mount, it works |
+| "works on my machine" | Content-addressed env, same everywhere |
+| Agents need hand-holding to set up | Agents see a directory that runs |
+| Env setup is ephemeral tribal knowledge | Env spec is versioned in the repo |
+| Secrets in .env files, gitignored, copy-pasted | Secrets encrypted, scoped, isolated |
+| Different env per machine, per dev, per CI | One env, content-hashed, reproducible |
 
-```markdown
-[![Run on zagi](https://zagi.sh/badge.svg)](https://zagi.sh/run/mattzcarey/zagi)
+## Why This Wins
+
+**Singular value prop: any repo, instantly runnable, locally.**
+
+Not a cloud IDE (you use your own tools). Not a container registry (it's a
+mount, not an image). Not a package manager (it manages the whole env, not
+just deps). Not a VCS replacement (git underneath).
+
+It's the layer that's missing between "I have the code" and "I can run the
+code." Nobody owns this.
+
+### Why not Nix directly?
+
+Nix delivers this technically but fails as a product. The learning curve is
+brutal, the documentation is labyrinthine, and flakes are still
+"experimental" after years. zagi uses Nix as a backend but hides it
+entirely. You write `zig = "0.15"` in a TOML file, not a Nix expression.
+
+### Why not Docker?
+
+Docker solves deployment, not development. A Dockerfile is imperative,
+non-reproducible (same Dockerfile can produce different images on different
+days), and gives you an isolated machine instead of a local directory.
+You can't `docker run` and then open the result in your editor with your
+dotfiles.
+
+### Why not devcontainers?
+
+Closer, but still a container. Tied to VS Code. Requires Docker. Doesn't
+work with arbitrary editors/agents. And the setup is still manual --
+someone has to write the devcontainer.json. zagi infers the environment.
+
+## Build In The Open
+
+This is an open source project. The core (`zagi mount`, env resolution,
+the store, the cache) is fully open. The value isn't in the code -- it's
+in the public cache (pre-built environments for popular repos) and the
+network effect (more repos with env specs = more useful for everyone).
+
+**What's open:**
+- `zagi` CLI (already open, Zig + libgit2)
+- Environment resolution engine
+- Mount/overlay implementation
+- Cache protocol
+- Auto-detection heuristics
+
+**What could be a service:**
+- Public cache server (hosting pre-built envs)
+- Mirror service (auto-generating env specs for GitHub repos)
+- Teams features (shared secrets, access control)
+
+## Technical Approach
+
+| Component | Implementation | Why |
+|-----------|---------------|-----|
+| Mount | FUSE (Linux), macFUSE/NFS (macOS) | Local directory, no container overhead |
+| Env resolution | Nix (hidden) | Only system that delivers reproducibility |
+| Env spec | TOML -> Nix compilation | Human-writable, machine-resolvable |
+| Store | Content-addressed, file-level dedup | Efficient, shared across projects |
+| Cache | HTTP, content-addressed | Simple, cacheable, CDN-friendly |
+| Secrets | age encryption + mount namespaces | Simple crypto, kernel-level isolation |
+| VCS | git (with jj optional) | Zero migration cost |
+
+### The mount in detail
+
+On Linux: FUSE filesystem that presents the overlay. Source files are
+real (read-write on your disk). Environment files are from the store
+(read-only, shared). The FUSE layer merges them and sets up PATH/env
+vars via a shell hook.
+
+On macOS: Similar via macFUSE or a local NFS mount. Alternatively, a
+simpler approach: symlink forest from the store + direnv-style shell
+activation. Less elegant but works without FUSE.
+
+Fallback: If FUSE isn't available, `zagi mount` can just materialize
+the environment into a local `.zagi/env` directory (copies or hardlinks
+from the store). Slower first time, but works everywhere.
+
+## What To Build First
+
+One command that works end to end:
+
+```
+$ zagi mount github.com/some/repo ./repo
+$ cd repo
+$ <the thing runs>
 ```
 
-Click it, get a running environment. Like "Open in Codespaces" but it actually works for any repo because the platform figured out the environment.
+In order:
 
-### Shareable sessions
+1. **Auto-detection** -- Given a repo, infer `env.toml` from lockfiles
+   and config. Support the big languages first: JS/TS, Python, Rust, Go,
+   Zig. This is the core intelligence.
 
-Every session has a URL. Share it and someone gets a fork of your exact state -- same code, same environment, same point in time. Like sharing a Google Doc, but for a running codebase.
+2. **Env resolution** -- Compile `env.toml` to a Nix derivation. Build it.
+   Cache the result in a local content-addressed store.
 
-## What This Is Not
+3. **Mount** -- Assemble the overlay directory. Shell hook for env
+   activation. Start with the simple approach (symlinks + direnv) and
+   upgrade to FUSE later.
 
-- **Not a new VCS.** Git underneath, jj semantics on top. No new storage format.
-- **Not just another cloud IDE.** The IDE is secondary. The primary interface is an agent. The environment is the product.
-- **Not Docker.** Docker is imperative (Dockerfile), mutable (layers change), and doesn't version-control environments. This is declarative (Nix), immutable (content-addressed), and every env change is a tracked commit.
-- **Not Nix.** Nix is the implementation detail, not the product. Users never write Nix. The platform infers and generates it.
+4. **Public cache** -- A server that hosts pre-built environments. Push to
+   it, pull from it. Makes first-time mount fast.
 
-## Technical Decisions
-
-| Decision | Choice | Why |
-|----------|--------|-----|
-| VCS storage | git | Migration cost, ecosystem, tooling |
-| VCS UX | jj semantics | Working-copy-as-commit, first-class conflicts, op log |
-| Environment | Nix | Only system that delivers actual reproducibility |
-| Containers | OCI-compatible | Layer sharing, content-addressing, existing tooling |
-| Secret storage | age encryption | Simple, auditable, no key server dependency |
-| Agent interface | LSP-like protocol | Structured, language-agnostic, extensible |
-| Review model | Per-change, continuous | Small units, fast feedback, agent-assisted |
-
-## Open Questions
-
-1. **Cost model.** Running ephemeral containers isn't free. Who pays? Per-session? Per-minute? Free tier with limits?
-2. **Offline story.** If the env is on the server, what happens without internet? Can you cache env closures locally (Nix already supports this)?
-3. **Large repos.** Monorepos with 10GB+ histories. Partial clone? Sparse checkout? Virtual filesystem?
-4. **Multi-service.** Apps that need postgres + redis + kafka. How far does the env spec go? Full docker-compose equivalent?
-5. **Trust model.** If an agent generates the env spec for a mirrored repo, how do you trust it didn't add malicious packages?
-6. **Private repos.** Mirroring private repos requires auth delegation. How does this work without storing GitHub tokens?
-
-## Priorities
-
-What to build first, in order:
-
-1. **Mirror + auto-env detection.** Mirror a public GitHub repo, infer its environment, make it runnable. This is the proof of concept and the viral hook.
-2. **Sessions.** Click a link, get a running environment with an agent. This is the "wow" moment.
-3. **jj integration.** Working-copy-as-commit, operation log, change IDs. Better local experience for agents and humans.
-4. **Continuous review.** Agent reviews as you code. Small changes, fast feedback.
-5. **Secret isolation.** Scoped secrets, audit logs, agent sandboxing.
-6. **Shareable sessions.** Fork someone's exact state from a URL.
-
-## Relationship to zagi
-
-zagi is the CLI layer. It already does agent-friendly git output, guardrails, prompt tracking, worktrees (forks), and task management. The next-gen platform is the hosting layer that makes zagi's vision work at scale:
-
-- `zagi` = better git CLI for agents (local)
-- `zagi platform` = runnable repos, sessions, review (remote)
-- Together = `git clone` feels like `ssh into a running app`
+5. **Mirror** -- `zagi mirror github.com/foo/bar` auto-detects the env,
+   builds it, pushes to cache. The viral loop: "I made your repo
+   instantly runnable, here's the link."
