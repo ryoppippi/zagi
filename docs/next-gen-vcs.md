@@ -384,33 +384,216 @@ Everything is open source. The moat is the global content-addressed
 store (every package, every tool, every version, chunked and deduped)
 and the network effect.
 
-## What To Build
+## Build Plan
+
+End goal:
 
 ```
-$ zagi clone mattzcarey/zagi
-$ cd zagi
-$ <it runs>
+$ zagi clone mattzcarey/cool-app
+$ cd cool-app
+$ node index.js    # works. fresh machine. no install.
 ```
 
-1. **Content-addressed store.** Chunking, dedup, pack storage.
-   This is the foundation everything else sits on.
+Everything below is ordered by what to build, with a POC at each
+stage that proves the approach before moving on.
 
-2. **`zagi add` (env).** Add tools (`node@22`) and services
-   (`postgres@16`) to the environment. Server resolves and builds
-   via Nix, chunks the result.
+---
 
-3. **`zagi commit` (deps).** Use npm/pip/cargo as normal. Commit
-   the result. zagi chunks and tracks node_modules/venv/target
-   the same way it tracks source. No lock file needed on clone.
+### Phase 1: Chunking engine
 
-4. **`zagi clone`.** Fetch the tracked state from the server,
-   download chunks (deduped against local store), assemble files,
-   activate env. One command, everything works.
+Build the content-defined chunking library in Zig.
 
-5. **Server-side builds.** Nix builds tools and runtimes for
-   `zagi add`. Chunks the result, stores in object storage.
+- GearHash rolling hash, ~64KB target chunk size
+- Chunk a directory tree → list of (path, [chunk_hash, ...])
+- Reassemble from chunks → original files
+- BLAKE3 for chunk hashes (fast, 256-bit)
 
-6. **Mirror.** `zagi mirror github.com/foo/bar` reads existing
-   lockfiles, runs the native package manager + `zagi add` for
-   env, converts a GitHub repo into a fully tracked zagi project.
-   Viral loop.
+**POC 1: "Can we store node_modules efficiently?"**
+
+```
+$ cd some-nextjs-project
+$ zagi-chunk node_modules/
+  Files: 14,832
+  Total: 218 MB
+  Chunks: 3,412
+  Unique: 3,290 (dedup ratio: 3.6%)
+
+$ npm update next    # minor version bump
+$ zagi-chunk node_modules/
+  Chunks: 3,445
+  New chunks: 89 (97.4% reuse from previous version)
+```
+
+This answers the first skeptic question: tracking node_modules
+is feasible because cross-version dedup is extremely high.
+
+---
+
+### Phase 2: Local store + round-trip
+
+Store chunks locally, prove the round-trip works.
+
+- Local store: `~/.zagi/store/` with chunk files
+- Manifest format: `{path → [chunk_hashes], permissions, symlinks}`
+- `zagi snapshot <dir>` → chunks dir, writes manifest, stores chunks
+- `zagi restore <manifest> <dir>` → reads manifest, assembles from chunks
+- Hardlink cache: extracted files hardlinked from store into projects
+
+**POC 2: "Round-trip works, hardlinks save disk"**
+
+```
+$ zagi snapshot .          # chunks everything, writes manifest
+  Manifest: .zagi/snapshots/abc123.manifest
+  Stored: 3,412 chunks (218 MB logical, 214 MB stored)
+
+$ rm -rf node_modules/
+$ zagi restore .zagi/snapshots/abc123.manifest .
+  Restored: 14,832 files (hardlinked from store)
+  Time: 0.8s
+
+$ ls -la node_modules/express/package.json
+  ... 2 ...   # hardlink count = 2 (store + working copy)
+```
+
+---
+
+### Phase 3: Remote store + push/pull
+
+Push chunks to R2/S3, pull them on another machine.
+
+- Pack format: group ~1024 chunks into ~64MB pack files
+- Pack index: maps chunk_hash → (pack_file, offset, length)
+- `zagi push` → uploads new chunks (packed) to R2
+- `zagi pull` → downloads manifest + packs, assembles locally
+- HTTP Range requests for fetching individual chunks from packs
+- Cross-project dedup: chunks are global, packs are shared
+
+**POC 3: "Clone a project on another machine without npm install"**
+
+Machine A (developer):
+```
+$ cd my-node-app
+$ npm i                    # normal npm install, one time
+$ zagi snapshot .
+$ zagi push
+  Uploading: 4 packs (212 MB), manifest
+  Done.
+```
+
+Machine B (fresh):
+```
+$ zagi pull user/my-node-app
+  Downloading: 4 packs (212 MB)
+  Assembling: 14,832 files
+  Done.
+
+$ ls node_modules/express/   # it's there
+$ node index.js              # it works (if node is installed)
+```
+
+This proves the storage model end-to-end. The only missing piece
+is: node itself isn't tracked yet (you still need it pre-installed).
+
+---
+
+### Phase 4: Shell hook + `zagi add`
+
+Make tools part of the tracked environment.
+
+- `zagi add node@22` → server fetches pre-built node from Nix
+  binary cache, chunks it, stores in global store. Client downloads
+  to `.zagi/env/node/22.0.0/`, symlinks `.zagi/env/bin/node`
+- Shell hook: `eval "$(zagi hook)"` → on `cd` into a zagi project,
+  prepends `.zagi/env/bin` to PATH. On `cd` out, restores PATH.
+- Server: thin Nix wrapper. Maps `node@22` → `nixpkgs.nodejs_22`,
+  fetches from Nix binary cache, re-chunks into our format.
+
+**POC 4: "Clone and it works. No install. No README."**
+
+Machine A:
+```
+$ zagi init
+$ zagi add node@22
+$ npm i express
+$ echo 'require("express")().listen(3000)' > index.js
+$ zagi commit -m "init"
+$ zagi push
+```
+
+Machine B (fresh machine, no node installed):
+```
+$ zagi clone user/my-app
+$ cd my-app                # shell hook fires, node is on PATH
+$ node index.js            # works
+```
+
+**This is the demo.** Everything after this is making it real.
+
+---
+
+### Phase 5: VCS -- history, branching, merging
+
+Replace snapshot/push/pull with real version control (jj-based).
+
+- Change graph: each commit = tree of (path → chunk_hashes)
+- Stable change IDs (jj-style short IDs like `kpqx`)
+- `zagi commit` replaces `zagi snapshot` -- records a change
+- `zagi log` shows history (source + deps + env in one graph)
+- `zagi branch`, `zagi checkout` -- switches everything atomically
+- Merging: jj's three-way merge, conflicts are data
+- Operation log: every mutation recorded, `zagi undo` works
+
+**POC 5: "Branch switches everything"**
+
+```
+$ zagi branch feature
+$ npm i lodash
+$ zagi commit -m "add lodash"
+$ zagi checkout main        # node_modules/lodash disappears
+$ zagi checkout feature     # it's back
+```
+
+---
+
+### Phase 6: Services
+
+Run postgres, redis, etc. as part of the environment.
+
+- `zagi add postgres@16` fetches postgres binary (same as tools)
+- `zagi run` starts services defined in the env (supervised)
+- Services store data in `.zagi/data/postgres/` (per-project)
+- `zagi checkout` stops services on old branch, starts on new
+- Process isolation: services run in a namespace, agents can't
+  access secrets
+
+This is where agents get a prod-like environment by default.
+
+---
+
+### Phase 7: Mirror + viral loop
+
+Convert existing GitHub repos into zagi projects automatically.
+
+- `zagi mirror github.com/foo/bar`
+- Reads package.json/Cargo.toml/requirements.txt
+- Detects tools (node version from .nvmrc, engines field, etc.)
+- Runs native package manager to install deps
+- Runs `zagi add` for detected tools
+- Commits everything, pushes to zagi store
+- Result: anyone can `zagi clone foo/bar` and it just works
+
+**POC 7: "Any popular GitHub repo, one command"**
+
+```
+$ zagi mirror github.com/vercel/next.js
+  Detected: node@20 (from .nvmrc), pnpm@9 (from packageManager)
+  Running: pnpm install
+  Adding: node@20
+  Chunking: 847 MB (node_modules + tools)
+  Stored: 112 MB (87% deduped against global store)
+  Done.
+
+$ zagi clone vercel/next.js    # anyone can do this now
+$ cd next.js
+$ pnpm build                   # works
+```
