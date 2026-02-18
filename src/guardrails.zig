@@ -57,11 +57,11 @@ pub const blocked_commands = [_]BlockedCommand{
     // Working tree destroyers
     .{
         .pattern = .{ .cmd_with_flag = .{ .cmd = "reset", .flag = "--hard" } },
-        .reason = "discards all uncommitted changes (unrecoverable)",
+        .reason = "discards all uncommitted changes",
     },
     .{
         .pattern = .{ .cmd_with_arg = .{ .cmd = "checkout", .arg = "." } },
-        .reason = "discards all working tree changes (unrecoverable)",
+        .reason = "discards all working tree changes",
     },
     .{
         .pattern = .{ .cmd_with_any_flag = .{ .cmd = "clean", .flags = &.{ "-f", "--force", "-fd", "-fx", "-fxd", "-d", "-x" } } },
@@ -69,17 +69,17 @@ pub const blocked_commands = [_]BlockedCommand{
     },
     .{
         .pattern = .{ .cmd_with_arg = .{ .cmd = "restore", .arg = "." } },
-        .reason = "discards all working tree changes (unrecoverable)",
+        .reason = "discards all working tree changes",
     },
     .{
         .pattern = .{ .cmd_with_flag = .{ .cmd = "restore", .flag = "--worktree" } },
-        .reason = "discards working tree changes (unrecoverable)",
+        .reason = "discards working tree changes",
     },
 
     // Remote history destroyers
     .{
         .pattern = .{ .cmd_with_any_flag = .{ .cmd = "push", .flags = &.{ "-f", "--force", "--force-with-lease", "--force-if-includes" } } },
-        .reason = "overwrites remote history (may cause data loss for collaborators)",
+        .reason = "overwrites remote history",
     },
 
     // Remote branch deleters
@@ -89,7 +89,7 @@ pub const blocked_commands = [_]BlockedCommand{
     },
     .{
         .pattern = .{ .cmd_with_arg_prefix = .{ .cmd = "push", .prefix = ":" } },
-        .reason = "deletes remote branch (refspec syntax)",
+        .reason = "deletes remote branch via refspec syntax",
     },
 
     // Stash destroyers
@@ -105,7 +105,7 @@ pub const blocked_commands = [_]BlockedCommand{
     // Branch force delete
     .{
         .pattern = .{ .cmd_with_flag = .{ .cmd = "branch", .flag = "-D" } },
-        .reason = "force deletes branch even if not merged (potential data loss)",
+        .reason = "force deletes branch even if not merged",
     },
 };
 
