@@ -1022,7 +1022,7 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     const detect = @import("detect.zig");
     if (detect.isAgentMode()) {
         stdout.print("error: edit command blocked\n", .{}) catch {};
-        stdout.print("hint: ask the user to edit this task themselves, then confirm with you when done\n", .{}) catch {};
+        stdout.print("hint: use 'tasks append' to add notes to a task\n", .{}) catch {};
         return Error.InvalidCommand;
     }
 

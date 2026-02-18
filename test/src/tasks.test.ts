@@ -235,9 +235,9 @@ describe("zagi tasks edit", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    // Edit is blocked in agent mode - agents should ask the user
+    // Edit is blocked in agent mode - agents should use append
     expect(result).toContain("error: edit command blocked");
-    expect(result).toContain("ask the user to edit this task");
+    expect(result).toContain("tasks append");
   });
 
   test("replaces when not in agent mode", () => {
