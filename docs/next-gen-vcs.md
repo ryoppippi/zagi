@@ -101,6 +101,37 @@ tracked code.
 Agents are great at this. "Update express and re-apply our body-parser
 fix" is a one-shot prompt.
 
+### Merging
+
+Source merges work like jj: three-way merge, conflicts are data.
+
+Deps merge at the file level. This works because of content-addressing:
+
+```
+Branch A: npm i express   → adds node_modules/express/*, body-parser/*, debug@4.3.4/...
+Branch B: npm i lodash    → adds node_modules/lodash/*, debug@4.3.4/...
+
+Merge: express files only on A → added.
+       lodash files only on B → added.
+       debug@4.3.4 on both → same hash, same content → no conflict.
+```
+
+Shared transitive deps have identical content, so identical hashes,
+so no conflicts. Non-overlapping changes (the common case) merge
+cleanly because the files are simply additive.
+
+Genuine conflicts -- both branches modified the same file differently
+-- are rare for deps and handled like any other conflict: it's data,
+you or an agent resolve it.
+
+You never re-run `npm install` during a merge. The tracked files ARE
+the truth. No lock file needed for reproducibility -- the actual
+content is in the store.
+
+Env merges (tools/services) are discrete items. Branch A added
+`node@22`, branch B added `postgres@16` → merge gets both. Both
+changed node version → conflict, pick one.
+
 ### Supply chain security
 
 Today, every `npm install` on every machine runs postinstall scripts
