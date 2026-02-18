@@ -25,9 +25,10 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 cmd_len += to_copy;
             }
 
-            stderr.print("error: destructive command blocked (ZAGI_AGENT is set)\n", .{}) catch {};
+            stderr.print("error: destructive command blocked\n", .{}) catch {};
             stderr.print("blocked: {s}\n", .{cmd_display[0..cmd_len]}) catch {};
             stderr.print("reason: {s}\n", .{reason}) catch {};
+            stderr.print("hint: ask the user to run this command themselves, then confirm with you when done\n", .{}) catch {};
             std.process.exit(1);
         }
     }
